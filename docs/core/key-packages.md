@@ -58,7 +58,7 @@ All Marmot key packages must:
 
 - Use **basic credentials** (Nostr pubkeys)
 - Support **Marmot Group Data Extension** (0xf2ee)
-- Include **last_resort extension** (0x000a) when reusable key packages are desired
+- Carry an empty **`last_resort_key_package` component** (`0x0004`) in a KeyPackage-level `app_data_dictionary` extension when reusable key packages are desired (`isLastResort`, default `true`). Last-resort status is not an MLS capability, so it is not advertised in the LeafNode capabilities
 - Carry a valid account identity proof app component (`0x8009`) on the LeafNode, signed by `signer`
 - Only use `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` ciphersuite
 - Have default lifetime of 3 months (configurable)
@@ -83,8 +83,11 @@ const ref = calculateKeyPackageRef(keyPackage.publicPackage, ciphersuiteImpl);
 import { keyPackageDefaultExtensions } from "@internet-privacy/marmot-ts";
 
 const extensions = keyPackageDefaultExtensions();
-// Returns: [{ extensionType: 0x000a, extensionData: ... }]
-// Includes last_resort extension
+// Returns: [{ extensionType: 0x0006, extensionData: ... }]
+// An app_data_dictionary holding the empty last_resort_key_package (0x0004) entry
+
+isLastResortKeyPackage(keyPackage.publicPackage); // true
+// (also true for KeyPackages carrying the legacy 0x000a last_resort extension)
 ```
 
 ## Capabilities

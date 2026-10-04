@@ -103,7 +103,7 @@ async function createKeyPackageEventInternal(
   }
 
   // Filter out GREASE values from the extension types
-  // We only want to include real extension ids (e.g. last_resort, app_data_dictionary), not GREASE
+  // We only want to include real extension ids (e.g. app_data_dictionary), not GREASE
   const filteredExtensionTypes = extensionTypes.filter((hexValue) => {
     // Parse the hex value back to number to check if it's a GREASE value
     const extType = parseInt(hexValue);
