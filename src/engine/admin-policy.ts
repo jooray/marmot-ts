@@ -15,6 +15,7 @@ import { decodeAdminPolicyV1 } from "../core/components/admin-policy.js";
 import { decodeAgentTextStreamQuicPolicyV1 } from "../core/components/agent-text-stream.js";
 import { decodeComponentsList } from "../core/components/app-components-list.js";
 import { decodeGroupAvatarUrlV1 } from "../core/components/avatar-url.js";
+import { decodeGroupBlossomImageV1 } from "../core/components/blossom-image.js";
 import { decodeEncryptedMediaPolicyV1 } from "../core/components/encrypted-media.js";
 import { decodeEncryptedMediaPolicyV2 } from "../core/components/encrypted-media-v2.js";
 import { decodeGroupLifecycleV1 } from "../core/components/group-lifecycle.js";
@@ -26,6 +27,7 @@ import {
   type AppComponentId,
   GROUP_ADMIN_POLICY_COMPONENT_ID,
   GROUP_AVATAR_URL_COMPONENT_ID,
+  GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
   GROUP_ENCRYPTED_MEDIA_COMPONENT_ID,
   GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID,
   GROUP_LIFECYCLE_COMPONENT_ID,
@@ -64,6 +66,7 @@ const COMPONENT_PAYLOAD_DECODERS: ReadonlyMap<
   [GROUP_MESSAGE_RETENTION_COMPONENT_ID, decodeMessageRetentionV1],
   [AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, decodeAgentTextStreamQuicPolicyV1],
   [GROUP_AVATAR_URL_COMPONENT_ID, decodeGroupAvatarUrlV1],
+  [GROUP_BLOSSOM_IMAGE_COMPONENT_ID, decodeGroupBlossomImageV1],
   [GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, decodeEncryptedMediaPolicyV1],
   [GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, decodeEncryptedMediaPolicyV2],
   [GROUP_LIFECYCLE_COMPONENT_ID, decodeGroupLifecycleV1],

@@ -20,7 +20,8 @@ import { KEY_PACKAGE_APP_COMPONENTS_TAG } from "../protocol.js";
  * `SUPPORTED_APP_COMPONENT_IDS`), inserted immediately before `0x800c`.
  * It also predates `marmot.group.encrypted-media.v2` (`0x800b`), which MDK
  * now advertises and requires in new groups; production advertises it between
- * `0x8009` and `0x800c` (ascending id order).
+ * `0x8009` and `0x800c` (ascending id order). It also predates marmot-ts
+ * advertising `group.blossom.image` (`0x8002`), emitted right after `0x8001`.
  * This helper projects the raw Rust fixture forward to what production is
  * expected to emit, without touching the pinned fixture bytes/hash.
  */
@@ -31,6 +32,9 @@ function withAccountIdentityProofTag(tags: string[][]): string[][] {
     if (idx === -1) return tag;
     const withProof = [...tag];
     withProof.splice(idx, 0, "0x8009", "0x800b");
+    const profile = withProof.indexOf("0x8001");
+    if (profile !== -1 && !withProof.includes("0x8002"))
+      withProof.splice(profile + 1, 0, "0x8002");
     return withProof;
   });
 }
