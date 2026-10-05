@@ -42,6 +42,8 @@ import {
   groupProfileEntry,
   GROUP_MESSAGE_RETENTION_COMPONENT_ID,
 } from "../../core/components/index.js";
+import { SUPPORTED_APP_COMPONENT_IDS } from "../../core/components/ids.js";
+import { validateWelcomeGroupState } from "../../engine/welcome-validation.js";
 import type { StoredKeyPackage } from "../key-package-manager.js";
 
 const SUITE = "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519" as const;
@@ -274,5 +276,46 @@ describe("joinFromWelcome Marmot group-state validation", () => {
     ]);
     const { group } = await join(welcome, carolKp);
     expect(group.state.groupContext.epoch).toBe(1n);
+  });
+
+  it("rejects a group that requires a component a member leaf does not advertise", async () => {
+    // 0xf123 is required and "supported" by this client, but no leaf
+    // advertises it (MDK validate_resulting_leaf_capabilities).
+    const { welcome, carolKp } = await welcomeFor(
+      [
+        groupProfileEntry({ name: "g", description: "" }),
+        adminPolicyEntry([alice.pubkey]),
+        { componentId: 0xf123, data: new Uint8Array([1]) },
+      ],
+      [0xf123],
+    );
+    await expect(
+      invitee.groups.joinFromWelcome({
+        welcome,
+        candidates: [
+          {
+            publicPackage: carolKp.publicPackage,
+            privatePackage: carolKp.privatePackage,
+            keyPackageRef: await calculateKeyPackageRef(carolKp.publicPackage),
+            hasMatchingSecret: true,
+          },
+        ],
+        ciphersuiteImpl: cs,
+      }),
+    ).rejects.toMatchObject({ reason: expect.stringMatching(/component/) });
+    // and directly, with 0xf123 treated as supported:
+    const joined = await joinWelcomeWithAuthor({
+      welcome,
+      keyPackage: carolKp.publicPackage,
+      privateKeys: carolKp.privatePackage,
+      ciphersuiteImpl: cs,
+    });
+    expect(() =>
+      validateWelcomeGroupState({
+        state: joined.state,
+        authorLeafIndex: joined.authorLeafIndex,
+        supportedComponentIds: [...SUPPORTED_APP_COMPONENT_IDS, 0xf123],
+      }),
+    ).toThrow(/does not advertise required app component 0xf123/);
   });
 });
