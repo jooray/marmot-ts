@@ -471,6 +471,7 @@ describe("exports", () => {
         "isValidNip65RelayListEvent",
         "isValidRelayUrl",
         "isWitnessEligible",
+        "joinWelcomeWithAuthor",
         "keyPackageDefaultExtensions",
         "makeAppComponentsExtension",
         "makeLeafAppComponentsExtension",
@@ -817,6 +818,7 @@ describe("./core exports", () => {
         "isValidInboxRelayListEvent",
         "isValidNip65RelayListEvent",
         "isWitnessEligible",
+        "joinWelcomeWithAuthor",
         "keyPackageDefaultExtensions",
         "makeAppComponentsExtension",
         "makeLeafAppComponentsExtension",
@@ -873,6 +875,7 @@ describe("./engine exports", () => {
     expect(Object.keys(engineExports).sort()).toMatchInlineSnapshot(`
       [
         "AdminDepletionError",
+        "COMPONENT_PAYLOAD_DECODERS",
         "CommitLegalityError",
         "DisbandingError",
         "ForkRecovery",
@@ -883,6 +886,7 @@ describe("./engine exports", () => {
         "RetainedHistoryStore",
         "StateNotificationLedger",
         "UnsupportedGroupProfileError",
+        "WelcomeGroupStateError",
         "collectWitnessesAt",
         "createAdminCommitPolicyCallback",
         "decodeDisbandConvergence",
@@ -906,6 +910,7 @@ describe("./engine exports", () => {
         "requiredComponentIdsOf",
         "resolveCandidateParent",
         "validatePreApplyProposals",
+        "validateWelcomeGroupState",
         "withCapturedProposals",
       ]
     `);
