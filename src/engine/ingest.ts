@@ -296,12 +296,20 @@ function terminalResult<TEnvelope>(
  * A failure — including an unattributable sender (no leaf index) or a
  * non-conformant payload — is `invalid_encoding`; the message is dropped, never
  * delivered.
+ *
+ * The sender leaf index refers to the ratchet tree of the epoch the message
+ * was sent in. For a message from a past epoch that tree is the retained
+ * `historicalReceiverData` entry, not `state.ratchetTree`: the sender may have
+ * been removed (or the leaf reused) since. Pass `messageEpoch` so the right
+ * tree is used; MDK reads the credential the same way (OpenMLS
+ * `ProcessedMessage::credential`, `cgka-engine/src/identity.rs`).
  */
 export function isAuthenticApplicationMessage(
   result: ProcessMessageResult & { kind: "applicationMessage" },
   state: ClientState,
   log: Debugger,
   label: string,
+  messageEpoch?: bigint,
 ): boolean {
   const senderLeafIndex = (result as { senderLeafIndex?: unknown })
     .senderLeafIndex;
@@ -310,8 +318,14 @@ export function isAuthenticApplicationMessage(
     return false;
   }
   try {
+    const ratchetTree =
+      messageEpoch !== undefined && messageEpoch < state.groupContext.epoch
+        ? state.historicalReceiverData.get(messageEpoch)?.ratchetTree
+        : state.ratchetTree;
+    if (!ratchetTree)
+      throw new Error(`no retained ratchet tree for epoch ${messageEpoch}`);
     const credential = getCredentialFromLeafIndex(
-      state.ratchetTree,
+      ratchetTree,
       senderLeafIndex as LeafIndex,
     );
     const senderPubkey = getCredentialPubkey(credential);
@@ -674,6 +688,7 @@ export async function* ingestEnvelopes<TEnvelope>(
             result.newState,
             log,
             envelopeLabel(envelope),
+            framedEpoch(message),
           )
         ) {
           // M3: forged inner id / author ⇒ invalid_encoding, never delivered.

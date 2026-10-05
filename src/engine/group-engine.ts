@@ -111,6 +111,7 @@ import {
 import {
   framedCommitProposalsWithSender,
   framedContentType,
+  framedEpoch,
 } from "./wire-format.js";
 import { logger } from "../utils/debug.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
@@ -2366,7 +2367,15 @@ export class MarmotGroupEngine<TEnvelope> {
     }
 
     if (result.kind === "applicationMessage") {
-      if (!isAuthenticApplicationMessage(result, state, log, "sweep"))
+      if (
+        !isAuthenticApplicationMessage(
+          result,
+          state,
+          log,
+          "sweep",
+          framedEpoch(message),
+        )
+      )
         return {
           kind: "skipped",
           envelope,
