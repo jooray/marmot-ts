@@ -41,6 +41,8 @@ import {
   type AppWitness,
   type BranchCandidate,
   commitDigest,
+  type CommitOrderingPriority,
+  commitOrderingPriority,
   compareBranchScores,
   type ConvergencePolicy,
   DEFAULT_CONVERGENCE_POLICY,
@@ -87,6 +89,11 @@ export interface ChainLink {
 export interface KnownNextState {
   parentTag: string;
   state: ClientState;
+  /**
+   * The commit's ordering class recorded when it was authored, used only when
+   * its proposals cannot be rebuilt from the parent snapshot.
+   */
+  priority?: CommitOrderingPriority;
 }
 
 /** Shared parent-relative candidate resolution used by live and tree recovery. */
@@ -94,6 +101,8 @@ export type ParentResolution =
   | {
       kind: "resolved";
       result: ProcessMessageResult & { kind: "newState" };
+      /** Ordering class of the resolved commit (`convergence.md` `tip_priority`). */
+      priority: CommitOrderingPriority;
     }
   | { kind: "authentication_mismatch" }
   | {
@@ -345,6 +354,9 @@ export async function resolveCandidateParent(params: {
       aad: new Uint8Array(),
     };
     const rebuilt = proposalsFromPublicCommit(parent, message);
+    const priority: CommitOrderingPriority = rebuilt
+      ? commitOrderingPriority(rebuilt.proposals)
+      : (known.priority ?? "ordinary");
     let outcome: CommitLegalityOutcome;
     try {
       outcome = rebuilt
@@ -364,7 +376,7 @@ export async function resolveCandidateParent(params: {
     }
     switch (outcome.kind) {
       case "legal":
-        return { kind: "resolved", result };
+        return { kind: "resolved", result, priority };
       case "violation":
         return {
           kind: "rejected",
@@ -416,7 +428,11 @@ export async function resolveCandidateParent(params: {
     });
     switch (outcome.kind) {
       case "legal":
-        return { kind: "resolved", result };
+        return {
+          kind: "resolved",
+          result,
+          priority: commitOrderingPriority(capturedCommit.proposals),
+        };
       case "violation":
         return {
           kind: "rejected",
@@ -616,6 +632,7 @@ export class ForkRecovery<TEnvelope> {
       seen: ReadonlySet<string>,
       chain: ChainLink[],
       witnesses: AppWitness[],
+      tipPriority?: CommitOrderingPriority,
     ): Promise<void> => {
       const accumulated = [...witnesses, ...(await witnessesAt(state))];
       let extended = false;
@@ -691,6 +708,7 @@ export class ForkRecovery<TEnvelope> {
               tipEpoch: forkEpoch + chain.length + 1,
               tipDigest: digest,
               tipCommitter: hexToBytes(terminal.actorPubkey),
+              tipPriority: resolution.priority,
               appWitnesses: accumulated,
             };
             tips.set(branch, next.newState);
@@ -721,6 +739,7 @@ export class ForkRecovery<TEnvelope> {
           new Set([...seen, tag]),
           [...chain, { parent: state, message, child: next.newState }],
           accumulated,
+          resolution.priority,
         );
       }
       if (!extended && !branchDeferred && tipMessage !== undefined) {
@@ -735,6 +754,7 @@ export class ForkRecovery<TEnvelope> {
           forkEpoch,
           tipEpoch,
           tipDigest: this.#commitDigestOf(tipMessage),
+          tipPriority,
           tipCommitter: (() => {
             const parent = chain.at(-1)?.parent;
             if (!parent) return new Uint8Array();
@@ -864,6 +884,7 @@ export class ForkRecovery<TEnvelope> {
       knownNextStates.set(bytesToHex(this.#commitDigestOf(msg)), {
         parentTag: bytesToHex(parent.confirmationTag),
         state: deserializeClientState(serializeClientState(next)),
+        priority: structural.ownCommitStamp.priority,
       });
     }
 
@@ -900,10 +921,12 @@ export class ForkRecovery<TEnvelope> {
           ? "witness_quorum_met"
           : winnerScore.appWitnessScore !== runner.appWitnessScore
             ? "app_witness_score"
-            : bytesToHex(winnerScore.tipCommitter) !==
-                bytesToHex(runner.tipCommitter)
-              ? "tip_committer"
-              : "tip_digest"
+            : winnerScore.tipPriority !== runner.tipPriority
+              ? "tip_priority"
+              : bytesToHex(winnerScore.tipCommitter) !==
+                  bytesToHex(runner.tipCommitter)
+                ? "tip_committer"
+                : "tip_digest"
       : "only_candidate";
     const decision = {
       selectedBranchId: bytesToHex(winnerTip.confirmationTag),
