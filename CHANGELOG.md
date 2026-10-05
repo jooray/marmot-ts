@@ -13,6 +13,7 @@
 ### Fixed
 
 - Blossom uploads validate destinations and ciphertext before signing, reject mismatched server descriptors, and use the spec fallback URL when a descriptor omits its URL.
+- Inviting from a kind 30443 event now checks that its tags describe the KeyPackage it carries, as MDK does: the `i` tag must be the KeyPackageRef, and `mls_ciphersuite`, `mls_extensions`, `mls_proposals` and `app_components` must each appear once and match the decoded LeafNode (`mls_proposals` with the same GREASE rules as `checkKeyPackageProposalsTag`). White Noise already rejected these events, so marmot-ts could invite from a KeyPackage other clients ignore. The check is exported as `validateKeyPackageEventMetadata` and throws `KeyPackageEventMetadataError`.
 
 ## 0.8.0
 
