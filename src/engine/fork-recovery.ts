@@ -22,6 +22,7 @@ import {
 } from "ts-mls";
 
 import { marmotAuthService } from "../core/auth-service.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
 import { getAppComponents } from "../core/components/dictionary.js";
 import {
   ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
@@ -396,6 +397,7 @@ export async function resolveCandidateParent(params: {
       context: {
         cipherSuite: ciphersuite,
         authService: marmotAuthService,
+        clientConfig: defaultMarmotClientConfig,
         externalPsks: {},
       },
       state: parent,
@@ -997,6 +999,7 @@ export async function collectWitnessesAt<TEnvelope>(params: {
           context: {
             cipherSuite: ciphersuite,
             authService: marmotAuthService,
+            clientConfig: defaultMarmotClientConfig,
             externalPsks: {},
           },
           state,
