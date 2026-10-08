@@ -32,6 +32,7 @@ import {
 
 import { getAppMessageExpiration } from "../core/app-message-expiration.js";
 import { marmotAuthService } from "../core/auth-service.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
 import { getMarmotGroupView } from "../core/client-state.js";
 import {
   deserializeClientState,
@@ -976,6 +977,7 @@ export class MarmotGroupEngine<TEnvelope> {
           context: {
             cipherSuite: this.ciphersuite,
             authService: marmotAuthService,
+            clientConfig: defaultMarmotClientConfig,
             externalPsks: {},
           },
           state: this.state,
@@ -1066,6 +1068,7 @@ export class MarmotGroupEngine<TEnvelope> {
           context: {
             cipherSuite: this.ciphersuite,
             authService: marmotAuthService,
+            clientConfig: defaultMarmotClientConfig,
             externalPsks: {},
           },
           state: this.state,
@@ -1154,6 +1157,7 @@ export class MarmotGroupEngine<TEnvelope> {
           context: {
             cipherSuite: this.ciphersuite,
             authService: marmotAuthService,
+            clientConfig: defaultMarmotClientConfig,
           },
           // WR-05: staged invalid Adds pruned, so never bundled by reference.
           state: prepared.commitState,
@@ -1317,6 +1321,7 @@ export class MarmotGroupEngine<TEnvelope> {
           context: {
             cipherSuite: this.ciphersuite,
             authService: marmotAuthService,
+            clientConfig: defaultMarmotClientConfig,
           },
           // WR-05: staged invalid Adds pruned, so never bundled by reference.
           state: prepared.commitState,
@@ -1420,6 +1425,7 @@ export class MarmotGroupEngine<TEnvelope> {
           context: {
             cipherSuite: this.ciphersuite,
             authService: marmotAuthService,
+            clientConfig: defaultMarmotClientConfig,
           },
           // WR-05: staged invalid Adds pruned, so never bundled by reference.
           state: prepared.commitState,
@@ -2269,6 +2275,7 @@ export class MarmotGroupEngine<TEnvelope> {
         context: {
           cipherSuite: this.ciphersuite,
           authService: marmotAuthService,
+          clientConfig: defaultMarmotClientConfig,
           externalPsks: {},
         },
         state,
