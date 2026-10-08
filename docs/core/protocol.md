@@ -51,6 +51,7 @@ state and mutated through `app_data_update` proposals (`0x0008`).
 | Id       | Component                                | Holds                                       |
 | -------- | ---------------------------------------- | ------------------------------------------- |
 | `0x8001` | `marmot.group.profile.v1`                | name, description                           |
+| `0x8002` | `marmot.group.blossom.image.v1`          | encrypted group image                       |
 | `0x8003` | `marmot.group.admin-policy.v1`           | admin Nostr pubkeys                         |
 | `0x8004` | `marmot.transport.nostr.routing.v1`      | nostr group id + relays                     |
 | `0x8005` | `marmot.group.message-retention.v1`      | retention window (seconds)                  |

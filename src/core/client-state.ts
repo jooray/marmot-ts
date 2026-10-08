@@ -47,6 +47,9 @@ import {
   decodeEncryptedMediaPolicyV1,
   decodeEncryptedMediaPolicyV2,
   decodeGroupAvatarUrlV1,
+  decodeGroupBlossomImageV1,
+  isGroupBlossomImagePresent,
+  type GroupBlossomImageV1,
   decodeGroupProfileV1,
   decodeMessageRetentionV1,
   decodeGroupLifecycleV1,
@@ -55,6 +58,7 @@ import {
   getEncryptedMediaPolicy,
   getEncryptedMediaPolicyV2,
   getGroupAvatarUrl,
+  getGroupBlossomImage,
   getGroupProfile,
   getMessageRetention,
   getGroupLifecycle,
@@ -94,6 +98,13 @@ export interface MarmotGroupView {
   relays: string[];
   /** Group avatar URL (`group.avatar-url.v1`, `0x8007`), if set. */
   avatarUrl?: string;
+  /**
+   * Encrypted group image (`group.blossom.image.v1`, `0x8002`), if one is set
+   * (an absent/cleared image is reported as `undefined`). Fetch the blob by
+   * `imageHash` and decrypt it with `decryptGroupBlossomImage`. When a group
+   * carries both, the spec says `avatarUrl` wins for rendering.
+   */
+  image?: GroupBlossomImageV1;
   /**
    * Group encrypted-media policy (`group.encrypted-media.v1`, `0x8008`): the
    * group-scoped blob-store endpoints and format, if set.
@@ -225,6 +236,16 @@ function decodeGroupComponent(
       return decodeAgentTextStreamQuicPolicyV1(data);
     case GROUP_AVATAR_URL_COMPONENT_ID:
       return decodeGroupAvatarUrlV1(data);
+    case GROUP_BLOSSOM_IMAGE_COMPONENT_ID: {
+      // Report presence and media type only: the key fields are MLS-protected
+      // secrets and do not belong in a debug projection.
+      const image = decodeGroupBlossomImageV1(data);
+      return {
+        present: isGroupBlossomImagePresent(image),
+        imageHashHex: bytesToHex(image.imageHash),
+        mediaType: image.mediaType,
+      };
+    }
     case GROUP_ENCRYPTED_MEDIA_COMPONENT_ID:
       return decodeEncryptedMediaPolicyV1(data);
     case GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID:
@@ -282,6 +303,7 @@ export function getMarmotGroupView(
     const adminPubkeys = getAdminPolicy(extensions);
     const routing = getNostrRouting(extensions);
     const avatar = getGroupAvatarUrl(extensions);
+    const image = getGroupBlossomImage(extensions);
     const encryptedMedia = getEncryptedMediaPolicy(extensions);
     const encryptedMediaV2 = getEncryptedMediaPolicyV2(extensions);
     const messageRetention = getMessageRetention(extensions);
@@ -296,6 +318,7 @@ export function getMarmotGroupView(
       adminPubkeys: adminPubkeys ?? [],
       relays: routing?.relays ?? [],
       avatarUrl: avatar?.url,
+      image: image && isGroupBlossomImagePresent(image) ? image : undefined,
       encryptedMedia,
       encryptedMediaV2,
       messageRetention,
