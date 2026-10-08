@@ -3,6 +3,7 @@ import { isEvent, NostrEvent } from "applesauce-core/helpers/event";
 
 import { defaultProposalTypes, ProposalAdd, type KeyPackage } from "ts-mls";
 import { validateKeyPackageAccountIdentityProof } from "../../../core/components/account-identity-proof.js";
+import { missingGroupRequirements } from "../../../core/key-package-eligibility.js";
 import {
   getKeyPackage,
   validateKeyPackageEventMetadata,
@@ -13,7 +14,7 @@ import { ProposalAction } from "../marmot-group.js";
 export function proposeInviteUser(
   keyPackageEvent: KeyPackage | NostrEvent,
 ): ProposalAction<ProposalAdd> {
-  return async ({ ciphersuite }) => {
+  return async ({ ciphersuite, state }) => {
     const keyPackage = isEvent(keyPackageEvent)
       ? getKeyPackage(keyPackageEvent)
       : keyPackageEvent;
@@ -33,6 +34,23 @@ export function proposeInviteUser(
     // "Validation"). Throws AccountIdentityProofError on any mismatch, or a
     // missing/forged/legacy/misplaced proof.
     validateKeyPackageAccountIdentityProof(keyPackage, ciphersuite.id);
+
+    // The invitee must support everything the group requires, including the
+    // Marmot app components in `app_components` and any required
+    // agent-text-stream role (group-setup.md: "clients check that the target
+    // KeyPackages support the capabilities required by the group"). ts-mls
+    // only enforces the MLS `required_capabilities`; MDK members reject an Add
+    // whose leaf misses a required component.
+    if (state) {
+      const missing = missingGroupRequirements(
+        keyPackage,
+        state.groupContext.extensions,
+      );
+      if (missing.length > 0)
+        throw new Error(
+          `Invitee KeyPackage does not support this group's requirements: ${missing.join(", ")}`,
+        );
+    }
 
     return {
       proposalType: defaultProposalTypes.add,
