@@ -75,17 +75,29 @@ jobs:
           NODE
 
       - name: Publish to npm
-        run: pnpm release
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if npm view "@internet-privacy/marmot-ts@${RELEASE_TAG#v}" version >/dev/null 2>&1; then
+            echo "Version ${RELEASE_TAG#v} is already on npm; skipping publish"
+          else
+            pnpm release
+          fi
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file release-notes.md
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; skipping creation"
+          else
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --latest --notes-file release-notes.md
+          fi
 
       - name: Publish Nostr notification
+        continue-on-error: true
         env:
           NOSTR_KEY: ${{ secrets.NOSTR_KEY }}
         run: |
