@@ -1,22 +1,17 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { EventSigner } from "applesauce-core";
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import {
   createCommit,
   defaultCryptoProvider,
   defaultProposalTypes,
   getCiphersuiteImpl,
-  type LeafIndex,
   unsafeTestingAuthenticationService,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
 
 import { MarmotGroup } from "../../client/group/marmot-group.js";
 import { GroupRegistry } from "../../client/group-registry.js";
-import type {
-  NostrNetworkInterface,
-  PublishResponse,
-} from "../../client/nostr-interface.js";
+import type { NostrNetworkInterface } from "../../client/nostr-interface.js";
 import { SerializedClientState } from "../../core/client-state.js";
 import { createCredential } from "../../core/credential.js";
 import { getPubkeyLeafNodeIndexes } from "../../core/group-members.js";
@@ -31,7 +26,7 @@ const ADMIN_ACCOUNT = testAccount(6);
 const MEMBER_ACCOUNT = testAccount(9);
 const ADMIN = ADMIN_ACCOUNT.pubkey;
 const MEMBER = MEMBER_ACCOUNT.pubkey;
-const SIGNER = { getPublicKey: async () => ADMIN } as EventSigner;
+const SIGNER = ADMIN_ACCOUNT.signer;
 
 function ackingNetwork(): NostrNetworkInterface {
   return {
@@ -42,7 +37,7 @@ function ackingNetwork(): NostrNetworkInterface {
       throw new Error("not used");
     },
     publish: async (_relays: string[], _event: NostrEvent) => ({
-      [RELAY]: { ok: true } as PublishResponse,
+      [RELAY]: { from: RELAY, ok: true },
     }),
     getUserInboxRelays: async () => {
       throw new Error("not used");
@@ -147,9 +142,10 @@ describe("own staged proposals in the history-tree snapshot (CR-08)", () => {
     //    snapshot that must be refreshed.
     const [memberLeaf] = getPubkeyLeafNodeIndexes(group.state, MEMBER);
     expect(memberLeaf).toBeDefined();
+    if (memberLeaf === undefined) throw new Error("Member leaf was not found");
     await group.sendProposal({
       proposalType: defaultProposalTypes.remove,
-      remove: { removed: memberLeaf as LeafIndex },
+      remove: { removed: memberLeaf },
     });
     expect(Object.keys(group.state.unappliedProposals)).toHaveLength(1);
     expect(bytesToHex(group.state.confirmationTag)).toBe(parentTag);
@@ -166,6 +162,8 @@ describe("own staged proposals in the history-tree snapshot (CR-08)", () => {
     // 4. Restart through the real load path.
     const registry = new GroupRegistry({
       store,
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
       rewindStore,
       signer: SIGNER,
       network: ackingNetwork(),

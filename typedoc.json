@@ -2,7 +2,22 @@
   "$schema": "https://typedoc.org/schema.json",
   "name": "Marmot-TS",
   "sourceLinkTemplate": "https://github.com/marmot-protocol/marmot-ts/blob/{gitRevision}/{path}#L{line}",
-  "entryPoints": ["src/index.ts"],
+  "entryPointStrategy": "resolve",
+  "entryPoints": [
+    "src/index.ts",
+    "src/mls.ts",
+    "src/client/index.ts",
+    "src/core/index.ts",
+    "src/engine/index.ts",
+    "src/audit/index.ts",
+    "src/extra/index.ts",
+    "src/extra/audit/node.ts",
+    "src/extra/audit/browser.ts",
+    "src/utils/index.ts"
+  ],
+  "displayBasePath": "src",
+  "excludeInternal": true,
+  "treatWarningsAsErrors": true,
   "out": ".vitepress/dist/reference",
   "basePath": "/reference",
   "navigation": {
@@ -45,27 +60,17 @@
     "@yields"
   ],
   "externalSymbolLinkMappings": {
-    "ts-mls": {
-      "Capabilities": "https://github.com/LukaJCB/ts-mls/tree/main/docs",
-      "ClientState": "https://github.com/LukaJCB/ts-mls/tree/main/docs",
-      "CustomExtension": "https://github.com/LukaJCB/ts-mls/tree/main/docs",
-      "Extension": "https://github.com/LukaJCB/ts-mls/tree/main/docs",
-      "GroupInfo": "https://github.com/LukaJCB/ts-mls/tree/main/docs",
-      "MlsMessage": "https://github.com/LukaJCB/ts-mls/tree/main/docs",
-      "Proposal": "https://github.com/LukaJCB/ts-mls/tree/main/docs",
-      "ProposalRemove": "https://github.com/LukaJCB/ts-mls/tree/main/docs"
-    },
     "nostr-tools": {
-      "NostrEvent": "https://github.com/nbd-wtf/nostr-tools"
+      "NostrEvent": "https://applesauce.build/typedoc/types/applesauce-core.Helpers.NostrEvent.html"
     },
     "applesauce-common": {
       "Rumor": "https://applesauce.build/typedoc/types/applesauce-common.Helpers.Rumor.html",
-      "FileMetadata": "https://applesauce.build/typedoc/",
-      "getFileMetadata": "https://applesauce.build/typedoc/",
-      "getFileMetadataFromImetaTag": "https://applesauce.build/typedoc/"
+      "FileMetadataFields": "https://applesauce.build/typedoc/types/applesauce-common.Helpers.FileMetadataFields.html",
+      "getFileMetadata": "https://applesauce.build/typedoc/functions/applesauce-common.Helpers.getFileMetadata.html",
+      "getFileMetadataFromImetaTag": "https://applesauce.build/typedoc/functions/applesauce-common.Helpers.getFileMetadataFromImetaTag.html"
     },
-    "@internet-privacy/marmot-ts": {
-      "InMemoryKeyValueStore": "#"
+    "typescript": {
+      "NumberConstructor.MAX_SAFE_INTEGER": "https://tc39.es/ecma262/multipage/numbers-and-dates.html#sec-number.max_safe_integer"
     }
   }
 }

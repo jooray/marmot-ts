@@ -381,6 +381,7 @@ export type AutoCommitIngestResult<TEnvelope> = {
  */
 export type RemovedIngestResult<TEnvelope> = {
   kind: "removed";
+  removalAttribution?: import("./fork-recovery.js").RemovalAttribution;
   result: ProcessMessageResult;
   envelope: TEnvelope;
   message: MlsMessage;

@@ -159,4 +159,11 @@ export class DeliveredPayloadLedger<TEnvelope> {
       if (branch.size === 0) this.#entries.delete(stateTag);
     }
   }
+
+  /** Only the published tree membership may release completed delivery evidence. */
+  commitRetention(tags: readonly string[]): void {
+    const keep = new Set(tags);
+    for (const tag of this.#entries.keys())
+      if (!keep.has(tag)) this.#entries.delete(tag);
+  }
 }

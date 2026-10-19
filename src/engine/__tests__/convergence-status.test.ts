@@ -5,7 +5,6 @@
  * `Settled`. A future-epoch commit can only be peeled with a mock peeler (a real
  * receiver lacks the future epoch's exporter), so this lives at the engine layer.
  */
-import debug from "debug";
 import {
   type CiphersuiteImpl,
   createCommit,

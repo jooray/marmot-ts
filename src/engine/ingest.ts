@@ -21,24 +21,33 @@ import { verifyApplicationRumorAuthorship } from "../core/application-rumor.js";
 import { getGroupProfileSupport } from "../core/components/account-identity-proof.js";
 import { marmotAuthService } from "../core/auth-service.js";
 import {
+  deserializeClientState,
+  serializeClientState,
+} from "../core/client-state.js";
+import {
   validateCommitLegality,
   validateUpdateProposalAccountIdentityProofs,
 } from "../core/components/integrity.js";
 import { classifyDisbandCommit } from "../core/components/disband-validation.js";
 import {
   type CommitOrderingKey,
+  DEFAULT_CONVERGENCE_POLICY,
   commitDigest,
   compareCommitOrderingKeys,
 } from "../core/convergence.js";
 import { getCredentialPubkey } from "../core/credential.js";
 import { type DeferredReason, deferredReasons } from "../core/inbound.js";
-import { classifyLateCommit } from "../core/retained-history.js";
+import {
+  classifyLateCommit,
+  isAppPayloadExpired,
+} from "../core/retained-history.js";
 import {
   requiredComponentIdsOf,
+  resolveCapturedCommitLegality,
   validatePreApplyProposals,
   withCapturedProposals,
 } from "./admin-policy.js";
-import type { RejectedForkCandidate } from "./fork-recovery.js";
+import { tipCommitterOf, type RejectedForkCandidate } from "./fork-recovery.js";
 import { contentDedupId } from "./message-dedup.js";
 import type { RetainedHistoryStore } from "./retained-store.js";
 import {
@@ -141,6 +150,8 @@ export interface IngestContext<TEnvelope> {
   retained: RetainedHistoryStore;
   /** The rollback horizon (`maxRewindCommits`) from the active convergence policy. */
   maxRewindCommits: number;
+  /** Application expiry is independent of retained recovery material. */
+  appPayloadPastEpochLimit?: number;
   log: Debugger;
   getState(): ClientState;
   /** True only for canonical protocol disband; Unrecoverable is not terminal. */
@@ -209,7 +220,7 @@ export interface IngestContext<TEnvelope> {
   toUnrecoverable(): void;
   /**
    * Content-derived inbound dedup (`inbound-processing.md`; reference
-   * `seen_message_ids` / `sent_message_ids`). Keyed on {@link contentDedupId} so
+   * `seen_message_ids` / `sent_message_ids`). Keyed on the internal `contentDedupId` so
    * the same MLS message re-wrapped in a fresh transport envelope is recognized
    * across sources and restarts-within-process.
    */
@@ -358,8 +369,11 @@ export async function* ingestEnvelopes<TEnvelope>(
   options?: {
     retryCount?: number;
     maxRetries?: number;
+    /** @internal Error accumulation shared by recursive retry passes. */
     _errors?: Array<{ envelope: TEnvelope; error: unknown }>;
+    /** @internal Deferred-message bookkeeping shared by recursive retry passes. */
     _deferred?: Map<TEnvelope, DeferredEntry>;
+    /** @internal Peel-failure bookkeeping shared by recursive retry passes. */
     _decryptFailed?: Set<TEnvelope>;
   },
 ): AsyncGenerator<IngestResult<TEnvelope>> {
@@ -600,7 +614,37 @@ export async function* ingestEnvelopes<TEnvelope>(
         continue;
       }
 
-      const parentForAuth = ctx.getState();
+      let parentForAuth = ctx.getState();
+      // Expired applications still require MLS authentication before a stale
+      // disposition. A finite application window may have released the live
+      // former receiver while Infinity or an exact recovery pin retains its
+      // canonical source snapshot. Authenticate an independent copy only: the
+      // stale guard below must never adopt this old state or consume live keys.
+      const sourceEpoch = framedEpoch(message);
+      const tipEpoch = Number(parentForAuth.groupContext.epoch);
+      if (
+        framedContentType(message) === contentTypes.application &&
+        sourceEpoch !== undefined &&
+        Number.isSafeInteger(Number(sourceEpoch)) &&
+        Number.isSafeInteger(tipEpoch) &&
+        !parentForAuth.historicalReceiverData.has(sourceEpoch) &&
+        isAppPayloadExpired(
+          Number(sourceEpoch),
+          tipEpoch,
+          ctx.appPayloadPastEpochLimit ??
+            DEFAULT_CONVERGENCE_POLICY.appPayloadPastEpochLimit,
+        )
+      ) {
+        const retainedSource = ctx.retained.stateAt(Number(sourceEpoch));
+        if (
+          retainedSource?.groupContext.epoch === sourceEpoch &&
+          bytesToHex(retainedSource.groupContext.groupId) ===
+            bytesToHex(parentForAuth.groupContext.groupId)
+        )
+          parentForAuth = deserializeClientState(
+            serializeClientState(retainedSource),
+          );
+      }
       const capture = withCapturedProposals(
         ctx.createAdminCallback(parentForAuth),
       );
@@ -666,6 +710,22 @@ export async function* ingestEnvelopes<TEnvelope>(
         ctx.dedup.remember(message);
         yield { kind: "processed", result, envelope, message };
       } else if (result.kind === "applicationMessage") {
+        const sourceEpoch = framedEpoch(message);
+        const tipEpoch = Number(ctx.getState().groupContext.epoch);
+        if (
+          sourceEpoch !== undefined &&
+          Number.isSafeInteger(Number(sourceEpoch)) &&
+          Number.isSafeInteger(tipEpoch) &&
+          isAppPayloadExpired(
+            Number(sourceEpoch),
+            tipEpoch,
+            ctx.appPayloadPastEpochLimit ??
+              DEFAULT_CONVERGENCE_POLICY.appPayloadPastEpochLimit,
+          )
+        ) {
+          yield { kind: "skipped", envelope, message, reason: "past-epoch" };
+          continue;
+        }
         // The MLS layer has authenticated the sender; advance our ratchet to
         // reflect the consumed generation even if we then drop the payload.
         ctx.setState(result.newState);
@@ -784,6 +844,19 @@ export async function* ingestEnvelopes<TEnvelope>(
       // CR-01: authorize against this commit's own parent — the state after
       // every earlier commit in this batch was applied.
       const parentForAuth = ctx.getState();
+      const removalParent = {
+        removingCommitter: bytesToHex(tipCommitterOf(parentForAuth, message)),
+        parentTag: bytesToHex(parentForAuth.confirmationTag),
+        parentEpoch: Number(parentForAuth.groupContext.epoch),
+        groupId: bytesToHex(parentForAuth.groupContext.groupId),
+        localIdentity: getCredentialPubkey(
+          getCredentialFromLeafIndex(
+            parentForAuth.ratchetTree,
+            parentForAuth.privatePath.leafIndex as LeafIndex,
+          ),
+        ),
+        localLeaf: Number(parentForAuth.privatePath.leafIndex),
+      };
       const capture = withCapturedProposals(
         ctx.createAdminCallback(parentForAuth),
       );
@@ -835,49 +908,18 @@ export async function* ingestEnvelopes<TEnvelope>(
         // AFTER processMessage returns (never inside the callback — Pitfall 1),
         // BEFORE canonical state advances. A violating commit is rejected here
         // and never reaches ctx.setState/ctx.recordCommit.
-        const legalityOutcome = validateCommitLegality({
-          parentState,
-          resultingState: result.newState,
-          proposals: capturedCommit.proposals,
-          committerLeafIndex: capturedCommit.committerLeafIndex,
-        });
+        const legalityOutcome = resolveCapturedCommitLegality(
+          validateCommitLegality({
+            parentState,
+            resultingState: result.newState,
+            proposals: capturedCommit.proposals,
+            committerLeafIndex: capturedCommit.committerLeafIndex,
+          }),
+          capturedCommit,
+        );
         if (legalityOutcome.kind === "undecidable") {
-          // WR-02: `capturedCommit` holds this commit's COMPLETE proposal list
-          // — the ts-mls callback fired during the `processMessage` that just
-          // returned `newState`. So an undecidable verdict on this seam means
-          // the classification input WAS genuinely captured and the only
-          // missing piece is the committer: ts-mls leaves `committerLeafIndex`
-          // undefined for every non-`member` sender type. No future protocol
-          // bytes can give a commit a member sender it never had, so deferring
-          // is not "retry once more arrives" — it is a permanent hold. The
-          // envelope is pooled and re-ingested, every pass re-defers and sets
-          // `#lastPassUnresolved`, which derives `convergenceStatus =
-          // Resolving` and therefore gates ALL local outbound work until
-          // source-epoch eviction. `foundation/errors.md`'s deferral rule is
-          // for inputs that COULD become processable; a structurally
-          // unattributable committer never can, so this fails closed as a
-          // terminal rejection — the same disposition the Update-admission
-          // seam already gives an unresolvable sender.
-          if (capturedCommit.committerLeafIndex === undefined) {
-            log(
-              "commit envelope:%s rejected reason:account-identity-proof detail:%s",
-              envelopeLabel(envelope),
-              legalityOutcome.detail,
-            );
-            ctx.dedup.remember(message);
-            yield {
-              kind: "rejected",
-              result,
-              envelope,
-              message,
-              reason: "account-identity-proof",
-              proofReason: "unattributable-leaf",
-            };
-            continue;
-          }
-          // A committer IS known, so this undecidable came from incomplete
-          // classification rather than an unattributable sender. That can
-          // still clear, so it keeps the deferral idiom (D-03/D-04): the input
+          // Complete unattributable captures become violations in the shared
+          // adapter. Residual undecidable input can still clear, so the input
           // stays retryable (no dedup.remember) and canonical state must not
           // advance (no ctx.setState). Retry is bounded by the existing pool
           // limits (maxSize plus source-epoch expiry against
@@ -978,6 +1020,11 @@ export async function* ingestEnvelopes<TEnvelope>(
             envelope,
             message,
             notifications,
+            removalAttribution: {
+              version: 2,
+              removalDigest: bytesToHex(acceptedCommitDigest),
+              ...removalParent,
+            },
           };
           return;
         }

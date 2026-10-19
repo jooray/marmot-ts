@@ -69,6 +69,16 @@ export interface MarmotConformanceSubjectOptions {
   keyPackages?: ReadonlyMap<string, KeyPackage>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
+}
+
 const ACTION_CAPABILITY: Record<
   ConformanceAction["type"],
   ConformanceCapability
@@ -128,9 +138,8 @@ const STEP_CAPABILITY: Record<string, ConformanceCapability> = {
 
 /** Strictly maps one MDK Scenario IR operation to a declared adapter capability. */
 export function parseMdkScenarioStep(value: unknown): ConformanceAction {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    throw new Error("Scenario IR step must be an object");
-  const step = value as Record<string, unknown>;
+  if (!isRecord(value)) throw new Error("Scenario IR step must be an object");
+  const step = value;
   if (typeof step.type !== "string")
     throw new Error("Scenario IR step must declare a string type");
   const capability = STEP_CAPABILITY[step.type];
@@ -140,19 +149,19 @@ export function parseMdkScenarioStep(value: unknown): ConformanceAction {
     step.type === "create_group" &&
     typeof step.creator === "string" &&
     typeof step.name === "string" &&
-    Array.isArray(step.invitees)
+    isStringArray(step.invitees)
   )
     return {
       type: "create_group",
       creator: step.creator,
-      invitees: step.invitees as string[],
+      invitees: step.invitees,
       name: step.name,
     };
   if (step.type === "deliver_all") return { type: "deliver_all" };
-  if (step.type === "tick" && Array.isArray(step.clients))
-    return { type: "tick", clients: step.clients as string[] };
-  if (step.type === "clear_events" && Array.isArray(step.clients))
-    return { type: "clear_events", clients: step.clients as string[] };
+  if (step.type === "tick" && isStringArray(step.clients))
+    return { type: "tick", clients: step.clients };
+  if (step.type === "clear_events" && isStringArray(step.clients))
+    return { type: "clear_events", clients: step.clients };
   if (
     step.type === "acknowledge_outbound" &&
     typeof step.client === "string" &&
@@ -169,32 +178,32 @@ export function parseMdkScenarioStep(value: unknown): ConformanceAction {
     typeof step.name === "string"
   )
     return { type: "update_group_data", client: step.client, name: step.name };
-  if (step.type === "observe_exact" && Array.isArray(step.clients))
-    return { type: "observe_exact", clients: step.clients as string[] };
-  if (step.type === "observe" && Array.isArray(step.clients))
-    return { type: "observe_exact", clients: step.clients as string[] };
+  if (step.type === "observe_exact" && isStringArray(step.clients))
+    return { type: "observe_exact", clients: step.clients };
+  if (step.type === "observe" && isStringArray(step.clients))
+    return { type: "observe_exact", clients: step.clients };
   if (
     step.type === "invite_members" &&
     typeof step.inviter === "string" &&
-    Array.isArray(step.invitees)
+    isStringArray(step.invitees)
   )
     return {
       type: "invite_members",
       inviter: step.inviter,
-      invitees: step.invitees as string[],
+      invitees: step.invitees,
     };
   if (
     step.type === "update_admin_policy" &&
     typeof step.client === "string" &&
-    Array.isArray(step.admins)
+    isStringArray(step.admins)
   )
     return {
       type: "update_admin_policy",
       client: step.client,
-      admins: step.admins as string[],
+      admins: step.admins,
     };
-  if (step.type === "observe_admin_policy" && Array.isArray(step.clients))
-    return { type: "observe_admin_policy", clients: step.clients as string[] };
+  if (step.type === "observe_admin_policy" && isStringArray(step.clients))
+    return { type: "observe_admin_policy", clients: step.clients };
   if (step.type === "set_partition") return { type: "set_partition" };
   if (step.type === "withhold_message" && typeof step.label === "string")
     return { type: "withhold_message", label: step.label };
@@ -457,7 +466,7 @@ export class MarmotConformanceSubject {
         return { kind: "supported", action: action.type };
       }
       case "snapshot": {
-        const group = this.requireGroup(action.client);
+        this.requireGroup(action.client);
         return {
           kind: "supported",
           action: action.type,

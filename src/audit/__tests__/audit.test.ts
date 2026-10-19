@@ -31,7 +31,11 @@ describe("JsonlAuditRecorder", () => {
   it("writes one JSON object per line", async () => {
     const lines: string[] = [];
     const recorder = new JsonlAuditRecorder({
-      writer: { appendLine: (line) => lines.push(line) },
+      writer: {
+        appendLine: (line) => {
+          lines.push(line);
+        },
+      },
     });
     const sink = new MemoryAuditSink();
     const emitter = new AuditEmitter({

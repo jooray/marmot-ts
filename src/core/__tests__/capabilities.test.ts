@@ -23,7 +23,10 @@ import { GROUP_BLOSSOM_IMAGE_COMPONENT_ID } from "../components/ids.js";
 
 // The legacy `marmot.account-identity-proof.v2` custom LeafNode extension (`0xf2f1`),
 // whose module was deleted in the Phase 7 clean cut (`ef756c8`). Referenced here only as
-// a literal to assert its absence and rejection (CUT-01/CUT-02).
+// a literal to assert its absence from current capabilities (CUT-01/CUT-02).
+// Rejection is covered separately in components/__tests__/account-identity-proof.test.ts:
+// "a KeyPackage-level 0xf2f1 extension -> legacy-extension-present" and
+// "legacy profile -> unsupported legacy-group".
 const LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE = 0xf2f1;
 
 describe("ensureMarmotCapabilities", () => {

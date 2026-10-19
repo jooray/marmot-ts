@@ -1,4 +1,3 @@
-import { EventSigner } from "applesauce-core";
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import {
   CiphersuiteImpl,
@@ -16,17 +15,14 @@ import { describe, expect, it } from "vitest";
 
 import { MarmotGroup } from "../../client/group/marmot-group.js";
 import type { IngestResult } from "../../client/session/group-session.js";
-import type {
-  NostrNetworkInterface,
-  PublishResponse,
-} from "../../client/nostr-interface.js";
+import type { NostrNetworkInterface } from "../../client/nostr-interface.js";
 import { SerializedClientState } from "../../core/client-state.js";
 import { createCredential } from "../../core/credential.js";
 import { createGroupEvent } from "../../core/group-message.js";
 import { getGroupMembers } from "../../core/group-members.js";
 import { createSimpleGroup } from "../../core/group.js";
 import { generateKeyPackage } from "../../core/key-package.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import { testAccount } from "../helpers/test-accounts.js";
 
 const RELAY = "wss://relay.test";
@@ -42,7 +38,7 @@ function recordingNetwork(published: NostrEvent[]): NostrNetworkInterface {
     },
     publish: async (_relays, event) => {
       published.push(event);
-      return { [RELAY]: { ok: true } as PublishResponse };
+      return { [RELAY]: { from: RELAY, ok: true } };
     },
     getUserInboxRelays: async () => {
       throw new Error("not used");
@@ -59,7 +55,12 @@ function marmotGroup(
 ) {
   return new MarmotGroup(state, {
     store: new InMemoryKeyValueStore<SerializedClientState>(),
-    signer: { getPublicKey: async () => pubkey } as EventSigner,
+    signer: {
+      getPublicKey: async () => pubkey,
+      signEvent: async () => {
+        throw new Error("Nostr identity signing is not used in this fixture");
+      },
+    },
     ciphersuite: impl,
     network,
   });
@@ -143,7 +144,9 @@ describe("SelfRemove member departure (B6)", () => {
       ],
       ratchetTreeExtension: true,
     });
-    const welcomeMsg = welcome!.welcome ?? (welcome as never);
+    if (!welcome)
+      throw new Error("Member Add commit did not produce a Welcome");
+    const welcomeMsg = welcome.welcome;
     const dEpoch1 = await joinGroup({
       context: ctx,
       welcome: welcomeMsg,
@@ -208,7 +211,7 @@ describe("SelfRemove member departure (B6)", () => {
       publicationAttempts += 1;
       if (publicationAttempts === 1) throw new Error("relay rejected commit");
       retriedPublished.push(event);
-      return { [RELAY]: { ok: true } as PublishResponse };
+      return { [RELAY]: { from: RELAY, ok: true } };
     };
     const retryGroup = marmotGroup(
       adminEpoch1,
@@ -283,11 +286,7 @@ describe("SelfRemove member departure (B6)", () => {
       ),
     );
     const withdrawn = applied.notifications.slice(0, 1);
-    (
-      adminGroup.session as unknown as {
-        ingest: () => AsyncGenerator<unknown>;
-      }
-    ).ingest = async function* () {
+    adminGroup.session.ingest = async function* () {
       yield {
         kind: "stateInvalidated",
         commitDigest: applied.commitDigest,

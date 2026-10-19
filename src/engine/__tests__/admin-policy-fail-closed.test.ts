@@ -21,6 +21,7 @@ import {
   getCiphersuiteImpl,
   joinGroup,
   type MlsMessage,
+  wireformats,
   processMessage,
   type Proposal,
   unsafeTestingAuthenticationService,
@@ -112,6 +113,11 @@ async function rawApply(
   state: ClientState,
   message: MlsMessage,
 ): Promise<ClientState> {
+  if (
+    message.wireformat !== wireformats.mls_public_message &&
+    message.wireformat !== wireformats.mls_private_message
+  )
+    throw new Error("expected a framed MLS message");
   const result = await processMessage({
     context: {
       cipherSuite: ctx.cipherSuite,

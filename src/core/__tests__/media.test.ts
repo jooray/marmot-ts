@@ -1,13 +1,13 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
-import type { NostrEvent } from "applesauce-core/helpers";
 import { defaultCryptoProvider, getCiphersuiteImpl } from "ts-mls";
 import { describe, expect, it, vi } from "vitest";
 
 import { GroupMediaStore } from "../../client/group/group-media-store.js";
 import { MarmotGroup } from "../../client/group/marmot-group.js";
 import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
-import { SerializedClientState } from "../client-state";
+import type { SerializedClientState } from "../client-state.js";
+import { MockNetwork } from "../../__tests__/helpers/mock-network.js";
 import {
   encryptedMediaBlossomDefault,
   type EncryptedMediaPolicyV1,
@@ -60,7 +60,7 @@ function cryptoFields(
   file: Uint8Array,
   mediaType = "image/jpeg",
   filename = "photo.jpg",
-) {
+): Parameters<typeof deriveMediaEncryptionKey>[2] {
   return { plaintextSha256: bytesToHex(sha256(file)), mediaType, filename };
 }
 
@@ -208,21 +208,23 @@ describe("deriveMediaEncryptionKey", () => {
 
   it("throws when plaintextSha256 is missing", async () => {
     const { clientState, ciphersuite } = await makeClientState();
+    // Deliberately cross the input boundary with a missing required field.
     await expect(
       deriveMediaEncryptionKey(clientState, ciphersuite, {
         mediaType: "image/jpeg",
         filename: "a.jpg",
-      } as MediaAttachment),
+      } as unknown as Parameters<typeof deriveMediaEncryptionKey>[2]),
     ).rejects.toThrow("plaintextSha256");
   });
 
   it("throws when mediaType is missing", async () => {
     const { clientState, ciphersuite } = await makeClientState();
+    // Deliberately cross the input boundary with a missing required field.
     await expect(
       deriveMediaEncryptionKey(clientState, ciphersuite, {
         plaintextSha256: bytesToHex(sha256(randomBytes(32))),
         filename: "a.jpg",
-      } as MediaAttachment),
+      } as unknown as Parameters<typeof deriveMediaEncryptionKey>[2]),
     ).rejects.toThrow("mediaType");
   });
 });
@@ -627,20 +629,10 @@ describe("MarmotGroup.decryptMedia", () => {
     const store = new InMemoryKeyValueStore<SerializedClientState>();
     const group = new MarmotGroup(clientState, {
       store,
-      signer: {
-        getPublicKey: async () => "a".repeat(64),
-        signEvent: async (event) => event as NostrEvent,
-      },
+      signer: testAccount(6).signer,
       ciphersuite,
       media: new GroupMediaStore(),
-      network: {
-        request: async () => [],
-        subscription: () => {
-          throw new Error("not implemented");
-        },
-        publish: async () => ({}),
-        getUserInboxRelays: async () => [],
-      },
+      network: new MockNetwork(),
     });
 
     const file = randomBytes(128);

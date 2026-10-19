@@ -1,5 +1,4 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { EventSigner } from "applesauce-core";
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import {
   createCommit,
@@ -13,10 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import { MarmotGroup } from "../../client/group/marmot-group.js";
 import { GroupRegistry } from "../../client/group-registry.js";
-import type {
-  NostrNetworkInterface,
-  PublishResponse,
-} from "../../client/nostr-interface.js";
+import type { NostrNetworkInterface } from "../../client/nostr-interface.js";
 import { SerializedClientState } from "../../core/client-state.js";
 import { createCredential } from "../../core/credential.js";
 import { createSimpleGroup } from "../../core/group.js";
@@ -29,7 +25,7 @@ const MEMBER_ACCOUNT = testAccount(11);
 const ADMIN_ACCOUNT = testAccount(6);
 const MEMBER = MEMBER_ACCOUNT.pubkey;
 const ADMIN = ADMIN_ACCOUNT.pubkey;
-const SIGNER = { getPublicKey: async () => MEMBER } as EventSigner;
+const SIGNER = MEMBER_ACCOUNT.signer;
 
 /** Mock network that acks every publish and records the envelopes. */
 function ackingNetwork(published: NostrEvent[] = []): NostrNetworkInterface {
@@ -42,7 +38,7 @@ function ackingNetwork(published: NostrEvent[] = []): NostrNetworkInterface {
     },
     publish: async (_relays, event) => {
       published.push(event);
-      return { [RELAY]: { ok: true } as PublishResponse };
+      return { [RELAY]: { from: RELAY, ok: true } };
     },
     getUserInboxRelays: async () => {
       throw new Error("not used");
@@ -89,9 +85,10 @@ async function buildMemberState() {
     ],
     ratchetTreeExtension: true,
   });
+  if (!welcome) throw new Error("Member Add commit did not produce a Welcome");
   const memberE1 = await joinGroup({
     context: ctx,
-    welcome: welcome!.welcome ?? (welcome as never),
+    welcome: welcome.welcome,
     keyPackage: memberKp.publicPackage,
     privateKeys: memberKp.privatePackage,
     ratchetTree: undefined,
@@ -177,6 +174,8 @@ describe("selfUpdate commit persistence (CR-09)", () => {
     // Session 2: restart through the real load path.
     const registry = new GroupRegistry({
       store,
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
       rewindStore,
       signer: SIGNER,
       network: ackingNetwork(),

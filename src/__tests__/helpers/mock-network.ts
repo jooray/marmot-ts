@@ -20,7 +20,7 @@ function matchesFilters(event: NostrEvent, filters: Filter[]): boolean {
       if (!values) continue;
       const list = Array.isArray(values) ? values : [values];
       const tag = key.slice(1);
-      if (!event.tags.some((t: any) => t[0] === tag && list.includes(t[1])))
+      if (!event.tags.some((t) => t[0] === tag && list.includes(t[1])))
         return false;
     }
     return true;
@@ -107,7 +107,7 @@ export class MockNetwork implements NostrNetworkInterface {
    * Query events matching filters (simple implementation)
    */
   async request(
-    relays: string[],
+    _relays: string[],
     filters: Filter | Filter[],
   ): Promise<NostrEvent[]> {
     const filterArray = Array.isArray(filters) ? filters : [filters];
@@ -119,7 +119,7 @@ export class MockNetwork implements NostrNetworkInterface {
    * delivers each future matching publish until unsubscribed.
    */
   subscription(
-    relays: string[],
+    _relays: string[],
     filters: Filter | Filter[],
   ): Subscribable<NostrEvent> {
     const filterArray = Array.isArray(filters) ? filters : [filters];
@@ -146,7 +146,7 @@ export class MockNetwork implements NostrNetworkInterface {
   /**
    * Get inbox relays for a user (mock)
    */
-  async getUserInboxRelays(pubkey: string): Promise<string[]> {
+  async getUserInboxRelays(_pubkey: string): Promise<string[]> {
     return ["wss://mock-inbox.test"];
   }
 

@@ -98,7 +98,7 @@ For restart attribution, persist both `ingestStateStore` (delivered identities a
 
 Every losing delivery in a rewind batch is recorded as pending before the session saves the winning state or begins history removal. Each successful removal is acknowledged durably, so interrupted cleanup retries all remaining obligations after restart.
 
-The ingestion delivery ledger contains decrypted payloads as well as identities. Protect it like plaintext history. Awaiting `group.destroy()`, `client.groups.destroy()`, or a successful `client.groups.leave()` purges the group's ingestion namespace, including delivery payloads and pending retractions, after admitted writes settle. Destruction closes that session permanently: stale references, delayed hydration, and saves cannot recreate its stored history or delivery ledger. Other groups' namespaces remain intact.
+The ingestion delivery ledger contains decrypted payloads as well as identities. Protect it like plaintext history. Finite settled retention releases obsolete completed ledger entries after their retained authority changes. Pending removals and every surviving delivery supporting the same rumor retain their exact tags, source epochs, producing digests and payload evidence until durable acknowledgement; an error after forwarding acknowledgement is repaired on restart. Awaiting `group.destroy()`, `client.groups.destroy()`, or a successful `client.groups.leave()` purges the group's ingestion namespace, including delivery payloads and pending retractions, after admitted writes settle. Destruction closes that session permanently: stale references, delayed hydration, and saves cannot recreate its stored history or delivery ledger. Other groups' namespaces remain intact.
 
 Omitting ingestion persistence or rewind persistence limits attribution to the current session. Persisted plaintext history alone cannot reconstruct its losing branch after restart. Durable stores must preserve `Uint8Array` values and remain isolated per account; see [Storage](/client/storage).
 
@@ -118,7 +118,70 @@ This behavior follows [`protocol-core/convergence.md`](https://github.com/marmot
 
 ## Retention and backfill
 
-History is independent of MLS epoch secrets. Relay **backfill** (re-ingesting old kind 445 events) can only decrypt epochs still within the engine's bounded rewind horizon; messages from pruned epochs surface as `unreadable` during `ingest` and cannot be recovered — but anything already written to history stays available. The `message-retention` group metadata field (see [Proposals](/client/proposals#updating-metadata)) is a group request for disappearing messages: a nonzero value asks members to delete each message's plaintext once its `created_at` plus the retention seconds pinned at that message's epoch has passed ([`app-components/message-retention-v1.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/message-retention-v1.md)). `GroupRumorHistory` does not enforce this. If `group.groupData?.messageRetention` is greater than `0n`, delete expired rumors from your backend yourself.
+History is independent of MLS epoch secrets. Relay **backfill** (re-ingesting old
+kind 445 events) cannot restore plaintext from released receiver secrets.
+Authenticated application delivery uses its own inclusive
+`appPayloadPastEpochLimit` window (5 epochs by default), independently of the
+recovery horizon. Application input one epoch below that floor is stale even
+with `maxRewindCommits: Infinity` or a pinned historical resumption receiver.
+Input that cannot decrypt retains its existing unreadable/deferred handling.
+Full recovery history therefore does not guarantee complete offline message
+backfill. Already stored rumors remain available under your application's policy.
+
+At tip epoch 10 with the default five-epoch application window, an authenticated
+epoch-5 payload remains in-window and an epoch-4 payload is stale. Retaining its
+source state for removal recovery or a resumption PSK does not change that
+classification. An unreadable old event has no authenticated source yet and
+retains the normal unreadable/deferred handling.
+
+Protocol retention never expires application rumor history or custom media by
+epoch. It does not call `removeMessage` or `purgeMessages` just because a recovery
+node or completed delivery record became obsolete. Fork retraction and explicit
+leave/destruction retain their separate cleanup behavior described above. Choose
+your own retention for history rows, rendered timelines, pagination snapshots,
+exports and custom decrypted-media caches, including opaque records without epoch
+attribution.
+
+This separates recovery-material release from deleting application content.
+Continue to handle fork invalidation and durably acknowledge its effects; a
+successful history read or completed delivery alone does not acknowledge pending
+retractions or state notifications.
+
+The `message-retention` group metadata field (see
+[Proposals](/client/proposals#updating-metadata)) is a group request for disappearing
+messages: a nonzero value asks members to delete each message's plaintext once its
+`created_at` plus the retention seconds pinned at that message's epoch has passed
+([`app-components/message-retention-v1.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/message-retention-v1.md)).
+`GroupRumorHistory` does not enforce this general message-expiry policy. If
+`group.groupData?.messageRetention` is greater than `0n`, implement expiry in your
+backend using the policy attributed to each message, rather than applying only
+the latest metadata value to all old rumors.
+
+### Library and caller plaintext ownership
+
+Completed delivery bookkeeping releases references to obsolete plaintext; it
+does not overwrite caller-owned outbound payload arrays or previously returned
+results. The image service owns independent copied cache arrays. After a
+successful facade save, it can detach and zero obsolete private copies while
+protecting current images, canonical retained states, actual retained fork/pinned
+images and active reads. Failed required persistence performs no retirement;
+an incomplete or changing retained-state capture defers optional retirement until
+a later successful save. Infinity preserves history-derived image identities
+without disabling the image cache's separate capacity limits.
+
+Caller-owned `Uint8Array`s, successfully returned image bytes, application rumor
+rows and custom media adapter values retain their references and exact bytes
+through protocol pruning. The library neither normalizes those bytes nor assumes
+authority to wipe them. Negative controls cover binary/Unicode payloads and
+application history/media across epoch advances and restart. Release of private
+copies is not a physical overwrite guarantee for garbage-collected memory,
+database pages, platform caches or backups. Protect retained secrets and plaintext
+at rest according to your platform and application policy.
+
+See [Fork History](/client/fork-history#growth-bounds) for eligible-window bounds
+and temporary pending-work growth, and
+[Storage](/client/storage#retention-checkpoint-and-restart-repair) for the durable
+checkpoint-before-delete order and interrupted-cleanup repair.
 
 ## Next steps
 

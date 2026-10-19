@@ -70,7 +70,10 @@ const DARKMATTER_REQUIRED_APP_COMPONENTS = [
 
 // The legacy `marmot.account-identity-proof.v2` custom LeafNode extension (`0xf2f1`),
 // whose module was deleted in the Phase 7 clean cut (`ef756c8`). Referenced here only as
-// a literal to assert its absence and rejection (CUT-01/CUT-02).
+// a literal to assert its absence from current capabilities (CUT-01/CUT-02).
+// Rejection is covered separately in components/__tests__/account-identity-proof.test.ts:
+// "a KeyPackage-level 0xf2f1 extension -> legacy-extension-present" and
+// "legacy profile -> unsupported legacy-group".
 const LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE = 0xf2f1;
 
 describe("darkmatter invite compatibility", () => {
@@ -145,6 +148,11 @@ describe("darkmatter invite compatibility", () => {
     // Basic credential with a 32-byte x-only identity, as darkmatter requires.
     // The leaf stores the numeric MLS credential-type code (basic = 1).
     expect(leaf.credential.credentialType).toBe(defaultCredentialTypes.basic);
+    if (
+      leaf.credential.credentialType !== defaultCredentialTypes.basic ||
+      !("identity" in leaf.credential)
+    )
+      throw new Error("expected a basic credential");
     expect(leaf.credential.identity).toHaveLength(32);
   });
 });

@@ -1,30 +1,21 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import { unlockGiftWrap } from "applesauce-common/helpers";
+import type { NostrEvent } from "applesauce-core/helpers/event";
+import type { SerializedClientState } from "../../core/client-state.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MockNetwork } from "../../__tests__/helpers/mock-network.js";
 import {
   ADDRESSABLE_KEY_PACKAGE_KIND,
   GROUP_EVENT_KIND,
 } from "../../core/protocol.js";
-import { StoredKeyPackage } from "../key-package-manager.js";
+import type { StoredKeyPackage } from "../key-package-manager.js";
 import { MarmotClient } from "../marmot-client.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 
 // ============================================================================
 // Shared setup helpers
 // ============================================================================
-
-async function makeClient(network: MockNetwork): Promise<MarmotClient> {
-  const account = PrivateKeyAccount.generateNew();
-  return new MarmotClient({
-    groupStateStore: new InMemoryKeyValueStore(),
-    keyPackageStore: new InMemoryKeyValueStore(),
-    signer: account.signer,
-    network,
-    clientId: "11".repeat(32),
-  });
-}
 
 async function setupTwoMemberGroup(mockNetwork: MockNetwork) {
   const adminAccount = PrivateKeyAccount.generateNew();
@@ -33,16 +24,16 @@ async function setupTwoMemberGroup(mockNetwork: MockNetwork) {
   const memberPubkey = await memberAccount.signer.getPublicKey();
 
   const adminClient = new MarmotClient({
-    groupStateStore: new InMemoryKeyValueStore(),
-    keyPackageStore: new InMemoryKeyValueStore(),
+    groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+    keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
     signer: adminAccount.signer,
     network: mockNetwork,
     clientId: "aa".repeat(32),
   });
 
   const memberClient = new MarmotClient({
-    groupStateStore: new InMemoryKeyValueStore(),
-    keyPackageStore: new InMemoryKeyValueStore(),
+    groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+    keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
     signer: memberAccount.signer,
     network: mockNetwork,
     clientId: "bb".repeat(32),
@@ -103,7 +94,7 @@ describe("groups.leave() proposal + destroy semantics", () => {
       groupStateStore,
       ingestStateStore: lifecycleStore,
       lifecycleStore,
-      keyPackageStore: new InMemoryKeyValueStore(),
+      keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: account.signer,
       network: mockNetwork,
     });
@@ -236,7 +227,7 @@ describe("groups.leave() proposal + destroy semantics", () => {
     // Swap in a network that always returns ok: false
     const failingNetwork = {
       ...mockNetwork,
-      publish: async (_relays: string[], event: any) => {
+      publish: async (_relays: string[], event: NostrEvent) => {
         mockNetwork.events.push(event); // still record the event
         return {
           "wss://mock-relay.test": { from: "wss://mock-relay.test", ok: false },
@@ -302,7 +293,7 @@ describe("MarmotClient.groups.leave()", () => {
     const { memberClient, memberGroup } =
       await setupTwoMemberGroup(mockNetwork);
 
-    const leftHandler = vi.fn();
+    const leftHandler = vi.fn<(groupId: Uint8Array) => void>();
     memberClient.groups.on("left", leftHandler);
 
     await memberClient.groups.leave(memberGroup.id);
@@ -337,7 +328,6 @@ describe("MarmotClient.groups.leave()", () => {
     const { memberClient, memberGroup } =
       await setupTwoMemberGroup(mockNetwork);
 
-    const groupIdHex = bytesToHex(memberGroup.id);
     const proposalsBefore = mockNetwork.events.filter(
       (e) => e.kind === GROUP_EVENT_KIND,
     ).length;

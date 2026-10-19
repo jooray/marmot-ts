@@ -3,7 +3,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { decode, mlsMessageDecoder, wireformats } from "ts-mls";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import fixture from "../../__tests__/fixtures/key-package-lifetime-rust.json";
+import fixture from "../../__tests__/fixtures/key-package-lifetime-rust.json" with { type: "json" };
 import {
   createDefaultKeyPackageLifetime,
   isLifetimeCurrentWithGrace,

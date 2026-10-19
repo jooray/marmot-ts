@@ -52,6 +52,20 @@ group.dirty; // unsaved state changes pending
 
 Outbound sends are **convergence-gated** — an intent submitted while the group is not `Settled` is queued until convergence resolves. See [Architecture](/guide/architecture#engine-module).
 
+### Removal and terminal disband
+
+`group.status` is `"active"`, `"removed"`, or `"disbanded"`. Check it separately from convergence and profile support: active membership alone does not make a send eligible.
+
+- **Removed:** outbound preparation and publication are blocked, and queued intents are rejected when removal is realized. The local tombstone and retained recovery material can remain stored. A retained branch can restore membership only when ordinary canonical branch selection supersedes the authenticated removal, legal replay starts at its exact active parent, and the resulting state restores the same local identity and leaf. Merely withdrawing a state notification or finding an active snapshot does not clear removal.
+- **Recovery pending:** status remains `"removed"` through authority, snapshot, marker and attribution-cleanup writes. Registry activation retries interrupted recovery and exposes active membership only after durable validation and cleanup finish. Invalid evidence, an absent retained anchor or legacy boolean-only removal stays fenced. Previously cancelled sends are not restored; submit new intents after successful recovery.
+- **Disbanded:** canonical terminal selection immediately closes outbound use, including when persistence fails. The status is absorbing for this group copy; `groupData` is `null` and the facade retains a scrubbed terminal projection. With durable lifecycle storage, restart repairs interrupted writes from terminal intent or tombstone authority. The restart guarantee begins with the first successful recoverable terminal write; a crash before that boundary can restore the previous active snapshot.
+
+Retained-anchor removal recovery is an intentional supported interpretation of canonical branch supersession, matching MDK's [`distributed_convergence.rs`](https://github.com/marmot-protocol/mdk/blob/d4e91c8d90293de1a664a950a134f747dbb197a8/crates/cgka-engine/src/distributed_convergence.rs). It differs from the terminal-local-leaf wording in [`protocol-core/member-departure.md`](https://github.com/marmot-protocol/marmot/blob/7fabb81b3ed6e2fffeb1b267a0d2ae92b0ab2c89/protocol-core/member-departure.md): it requires retained authenticated recovery material. Destroying that material prevents this recovery; an independently validated fresh Welcome remains the rejoin path.
+
+Removal and disband callbacks use a consumed-attempt record before listeners run. Durable stores suppress another attempt for the same lifecycle event after restart, but failure around that write can lose the callback. They do not promise exactly-once external execution. Terminal disband suppresses a duplicate removal callback from the same commit. Reconcile from loaded `group.status`, and see [Storage](/client/storage#callback-delivery-boundary) for required adapters and failure limits.
+
+Terminal activation and ingestion also retry unfinished history retractions and replay unacknowledged convergence effects. Fully drain ingestion results and durably acknowledge effects after applying them; a terminal status does not itself acknowledge application work.
+
 ## Sending messages
 
 Build an application-message intent and submit it. The manager helper is the usual path:
@@ -196,29 +210,39 @@ for (const outcome of group.pendingWelcomes) {
 
 - An unknown `pubkey` (never an invitee of this founding create) throws — it fails loudly rather than silently no-opping.
 - A `pubkey` whose Welcome already succeeded returns the existing outcome unchanged, without re-publishing.
+- Concurrent calls for the same retained recipient obligation share one delivery; different recipients proceed independently.
+- A settled failure clears that obligation's in-flight attempt. A later explicit call retries it; no automatic retry loop is started.
+- Success is retained monotonically: a later failing founding fanout or retry cannot replace it. Sharing and settlement are bound to the encoded Welcome, author, recipient pubkey and KeyPackage event id; a changed obligation proceeds separately, and older completions cannot overwrite it.
 - The report is **not persisted**: `welcomeDeliveries` / `pendingWelcomes` are in-memory only and empty again after a restart or a fresh load of the group, even though the invitee remains a member who was never told.
 
-The only recovery for a Welcome that was never delivered (before or after a restart) is to re-invite that member with a **fresh KeyPackage** against the now-canonical group (`refs/marmot/protocol-core/publish-lifecycle.md`) — the original KeyPackage material a founding create consumed is not restorable.
+While the group remains loaded, explicitly retry its failed retained Welcome
+obligations. After a restart or fresh load, a missing report cannot reconstruct
+that outbound work: re-invite the member with a **fresh KeyPackage** against the
+now-canonical group ([`protocol-core/publish-lifecycle.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/publish-lifecycle.md)).
+The original consumed KeyPackage material is not restorable. These retry and
+success guarantees are process-local to the retained obligation, without
+cross-process coordination or a durable outbound journal.
 
 ## Events
 
 `MarmotGroup` extends `EventEmitter`. Available events:
 
-| Event                | Payload                              | Fires when                                                                   |
-| -------------------- | ------------------------------------ | ---------------------------------------------------------------------------- |
-| `applicationMessage` | `Uint8Array`                         | A decrypted application message is received                                  |
-| `stateChanged`       | `ClientState`                        | Group state advances (commit, proposal, message)                             |
-| `stateSaved`         | `MarmotGroup`                        | State was persisted to the store                                             |
-| `removed`            | `MarmotGroup`                        | An inbound commit removed **this** member (admin or self-removal)            |
-| `destroyed`          | `MarmotGroup`                        | The group's local state was destroyed                                        |
-| `disbanded`          | `(MarmotGroup, GroupDisbandedEvent)` | The group was disbanded (terminal; emitted once)                             |
-| `historyError`       | `Error`                              | Best-effort history persistence failed (non-blocking)                        |
-| `historyChanged`     | `MarmotGroup`                        | Ingest grew the fork-history tree (see [Fork History](/client/fork-history)) |
+| Event                | Payload                              | Fires when                                                                          |
+| -------------------- | ------------------------------------ | ----------------------------------------------------------------------------------- |
+| `applicationMessage` | `Uint8Array`                         | A decrypted application message is received                                         |
+| `stateChanged`       | `ClientState`                        | Group state advances (commit, proposal, message)                                    |
+| `stateSaved`         | `MarmotGroup`                        | State was persisted to the store                                                    |
+| `removed`            | `MarmotGroup`                        | A non-disband removal of **this** member is realized; consumed-attempt limits apply |
+| `destroyed`          | `MarmotGroup`                        | The group's local state was destroyed                                               |
+| `disbanded`          | `(MarmotGroup, GroupDisbandedEvent)` | Canonical terminal disband is realized; consumed-attempt limits apply               |
+| `historyError`       | `Error`                              | Best-effort history persistence failed (non-blocking)                               |
+| `historyChanged`     | `MarmotGroup`                        | Ingest grew the fork-history tree (see [Fork History](/client/fork-history))        |
 
 ```typescript
 group.on("removed", (g) => {
-  // Local state is kept as a tombstone — decide when to purge it
-  void client.groups.destroy(g.id);
+  // Mark membership inactive in your UI. Keep retained recovery material
+  // if you want canonical branch supersession to restore membership.
+  console.log(g.idStr, g.status);
 });
 ```
 

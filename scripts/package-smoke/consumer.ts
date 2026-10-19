@@ -4,6 +4,10 @@
 
 import {
   MarmotClient,
+  MarmotGroupEngine as RootGroupEngine,
+  type AuditSink as RootAuditSink,
+  normalizeRelayUrl as rootNormalizeRelayUrl,
+  GroupImageService as RootGroupImageService,
   marmotAuthService as rootAuthService,
   type GroupImageProfile as RootImageProfile,
   type GroupImageReadResult as RootImageReadResult,
@@ -18,6 +22,10 @@ import {
   decryptGroupImage,
   getGroupImageSource,
   getGroupImageSnapshotIdentity,
+  isApplicationMessage,
+  isCommitMessage,
+  isProposalMessage,
+  type GroupMessagePair,
   type GroupBlossomImage,
   type GroupBlossomImagePresent,
   type EncryptedGroupImage,
@@ -43,10 +51,139 @@ import {
 import {
   encode,
   groupContextEncoder,
+  wireformats,
   type ClientState,
   type GroupContext,
   type AuthenticationService,
 } from "@internet-privacy/marmot-ts/mls";
+import { MarmotGroupEngine } from "@internet-privacy/marmot-ts/engine";
+import {
+  noopAuditSink,
+  type AuditSink,
+} from "@internet-privacy/marmot-ts/audit";
+import { InMemoryKeyValueStore } from "@internet-privacy/marmot-ts/extra";
+import { NodeJsonlAuditRecorder } from "@internet-privacy/marmot-ts/extra/audit/node";
+import {
+  AutoBrowserAuditWriter,
+  type AutoBrowserAuditWriterOptions,
+} from "@internet-privacy/marmot-ts/extra/audit/browser";
+import { normalizeRelayUrl } from "@internet-privacy/marmot-ts/utils";
+
+// Exact type equality supplements runtime object identity; bidirectional
+// assignments alone would accept some structurally wider declaration mistakes.
+type IsAny<T> = 0 extends 1 & T ? true : false;
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+    ? true
+    : false;
+type Assert<T extends true> = T;
+export type EntrypointIdentities = [
+  Assert<Equal<IsAny<MarmotClient>, false>>,
+  Assert<Equal<IsAny<GroupImageService>, false>>,
+  Assert<Equal<IsAny<typeof createSimpleGroup>, false>>,
+  Assert<Equal<IsAny<typeof groupContextEncoder>, false>>,
+  Assert<Equal<IsAny<MarmotGroupEngine<unknown>>, false>>,
+  Assert<Equal<IsAny<AuditSink>, false>>,
+  Assert<Equal<IsAny<InMemoryKeyValueStore<string>>, false>>,
+  Assert<Equal<IsAny<NodeJsonlAuditRecorder>, false>>,
+  Assert<Equal<IsAny<AutoBrowserAuditWriter>, false>>,
+  Assert<Equal<IsAny<typeof normalizeRelayUrl>, false>>,
+  Assert<Equal<typeof RootGroupEngine, typeof MarmotGroupEngine>>,
+  Assert<Equal<typeof RootGroupImageService, typeof GroupImageService>>,
+  Assert<Equal<RootAuditSink, AuditSink>>,
+  Assert<Equal<typeof rootNormalizeRelayUrl, typeof normalizeRelayUrl>>,
+  Assert<Equal<typeof rootAuthService, typeof coreAuthService>>,
+  Assert<Equal<RootImageProfile, GroupImageProfile>>,
+  Assert<Equal<RootImageReadResult, GroupImageReadResult>>,
+  Assert<Equal<CoreState, ClientState>>,
+];
+
+export const auditContract: AuditSink = noopAuditSink;
+export const relayContract: string = normalizeRelayUrl("wss://relay.example");
+export async function extraStoreContract(): Promise<string | null> {
+  const store = new InMemoryKeyValueStore<string>();
+  await store.setItem("packed", "consumer");
+  const keys: string[] = await store.keys();
+  return keys.length ? store.getItem(keys[0]!) : null;
+}
+export function nodeRecorderContract(path: string): NodeJsonlAuditRecorder {
+  const recorder = new NodeJsonlAuditRecorder(path);
+  const sink: AuditSink = recorder;
+  // @ts-expect-error - AuditSink must preserve its event contract.
+  sink.record(42);
+  return recorder;
+}
+export async function browserWriterContract(
+  options: AutoBrowserAuditWriterOptions,
+): Promise<AutoBrowserAuditWriter> {
+  const writer = await AutoBrowserAuditWriter.open(options);
+  await writer.appendLine("packed consumer");
+  return writer;
+}
+export function engineStateContract(
+  engine: MarmotGroupEngine<unknown>,
+): ClientState {
+  return engine.state;
+}
+
+// Every remaining entry has a negative contract: `any` would make these
+// expect-error directives unused, and a wrong entry would lose its named anchor.
+// @ts-expect-error - Engine state cannot be a number.
+export const engineGuard: MarmotGroupEngine<unknown> = 42;
+// @ts-expect-error - Audit sink requires record(event).
+export const auditGuard: AuditSink = 42;
+// @ts-expect-error - Extra store retains its generic value contract.
+new InMemoryKeyValueStore<string>().setItem("packed", 42);
+// @ts-expect-error - Node recorder requires a string path.
+new NodeJsonlAuditRecorder(42);
+export type BrowserBackend = AutoBrowserAuditWriterOptions["backend"];
+// @ts-expect-error - Browser writer backend discriminant is closed.
+export const browserGuard: BrowserBackend = "disk";
+// @ts-expect-error - Utility URL normalization requires a string.
+normalizeRelayUrl(42);
+
+export function commitSourceEpoch(pair: GroupMessagePair): bigint | undefined {
+  if (!isCommitMessage(pair)) return undefined;
+  // @ts-expect-error - A successful handshake guard is not private-only.
+  pair.message.privateMessage;
+  switch (pair.message.wireformat) {
+    case wireformats.mls_public_message:
+      return pair.message.publicMessage.content.epoch;
+    case wireformats.mls_private_message:
+      return pair.message.privateMessage.epoch;
+    default: {
+      const exhaustive: never = pair.message;
+      return exhaustive;
+    }
+  }
+}
+
+export function proposalContentType(
+  pair: GroupMessagePair,
+): number | undefined {
+  if (!isProposalMessage(pair)) return undefined;
+  // @ts-expect-error - Public fields also require a carriage branch.
+  pair.message.publicMessage;
+  switch (pair.message.wireformat) {
+    case wireformats.mls_public_message:
+      return pair.message.publicMessage.content.contentType;
+    case wireformats.mls_private_message:
+      return pair.message.privateMessage.contentType;
+    default: {
+      const exhaustive: never = pair.message;
+      return exhaustive;
+    }
+  }
+}
+
+export function applicationCiphertext(
+  pair: GroupMessagePair,
+): Uint8Array | undefined {
+  if (!isApplicationMessage(pair)) return undefined;
+  // @ts-expect-error - Application classification excludes public carriage.
+  pair.message.publicMessage;
+  return pair.message.privateMessage.ciphertext;
+}
 
 // Both supported surfaces must expose the actual vendored MLS policy contract.
 export const publicAuthServices: AuthenticationService[] = [

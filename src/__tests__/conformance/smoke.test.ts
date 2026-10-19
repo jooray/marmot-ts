@@ -1,4 +1,4 @@
-import manifestJson from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/manifest.v1.json";
+import manifestJson from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/manifest.v1.json" with { type: "json" };
 import { readFileSync } from "node:fs";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
@@ -20,6 +20,21 @@ import { MarmotConformanceSubject, parseMdkScenarioStep } from "./subject.js";
 
 const VECTORS_ROOT = "refs/mdk/crates/cgka-conformance-simulator/vectors";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value))
+    throw new Error("Expected a conformance fixture object");
+  return value;
+}
+
+function requireText(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Expected fixture text");
+  return value;
+}
+
 describe("portable MDK conformance smoke corpus", () => {
   const manifest = validateConformanceManifest(manifestJson, VECTORS_ROOT);
   const portable = manifest.entries.filter(
@@ -30,24 +45,29 @@ describe("portable MDK conformance smoke corpus", () => {
   for (const entry of portable) {
     it(entry.id, async () => {
       expect(entry.artifact).toBeDefined();
-      const fixture = JSON.parse(
-        readFileSync(
-          resolveManifestArtifact(VECTORS_ROOT, entry.artifact!),
-          "utf8",
+      const fixture = requireRecord(
+        JSON.parse(
+          readFileSync(
+            resolveManifestArtifact(VECTORS_ROOT, entry.artifact!),
+            "utf8",
+          ),
         ),
-      ) as Record<string, any>;
+      );
 
       // Byte fixtures execute through the production codec. The Scenario IR
       // corpus remains explicit until the adapter implements its mutation and
       // scheduler actions; a portable vector must never silently disappear.
       if (String(fixture.vector_type).startsWith("app_component_")) {
-        if (fixture.expected.valid) {
-          const decoded = decodeNostrRoutingV1(hexToBytes(fixture.bytes.hex));
-          expect(decoded.relays).toEqual(fixture.expected.fields.relays);
+        const expected = requireRecord(fixture.expected);
+        const bytes = requireRecord(fixture.bytes);
+        if (typeof expected.valid !== "boolean")
+          throw new Error("Expected fixture validity");
+        const hex = requireText(bytes.hex);
+        if (expected.valid) {
+          const decoded = decodeNostrRoutingV1(hexToBytes(hex));
+          expect(decoded.relays).toEqual(requireRecord(expected.fields).relays);
         } else {
-          expect(() =>
-            decodeNostrRoutingV1(hexToBytes(fixture.bytes.hex)),
-          ).toThrow();
+          expect(() => decodeNostrRoutingV1(hexToBytes(hex))).toThrow();
         }
         // MDK manifest 93ecfbca calls the valid update
         // `update-valid-two-relays/v1`, while its immutable fixture_name is
@@ -57,8 +77,11 @@ describe("portable MDK conformance smoke corpus", () => {
           /^marmot\.transport\.nostr\.routing\.v1\//,
         );
       } else {
-        expect(fixture.scenario?.name).toBe(entry.id);
-        expect(fixture.scenario?.steps?.length).toBeGreaterThan(0);
+        const scenario = requireRecord(fixture.scenario);
+        expect(scenario.name).toBe(entry.id);
+        if (!Array.isArray(scenario.steps))
+          throw new Error("Expected fixture steps");
+        expect(scenario.steps.length).toBeGreaterThan(0);
         const subject = new MarmotConformanceSubject({
           scenarioId: entry.id,
           groups: new Map(),
@@ -78,7 +101,7 @@ describe("portable MDK conformance smoke corpus", () => {
             throw new Error("unsupported restart must not execute");
           },
         });
-        for (const rawStep of fixture.scenario.steps) {
+        for (const rawStep of scenario.steps) {
           const action = parseMdkScenarioStep(rawStep);
           if (action.type !== "scenario_operation") {
             expect(subject.support(action)).toBeUndefined();
@@ -125,7 +148,7 @@ describe("portable MDK conformance smoke corpus", () => {
     const group = new MarmotGroup(clientState, {
       store: new InMemoryKeyValueStore(),
       ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
-      signer: { getPublicKey: async () => pubkey } as never,
+      signer: account.signer,
       ciphersuite,
       network,
     });

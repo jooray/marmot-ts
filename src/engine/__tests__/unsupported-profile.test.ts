@@ -18,6 +18,7 @@ import {
   defaultProposalTypes,
   getCiphersuiteImpl,
   type CiphersuiteImpl,
+  type ClientState,
   selfRemoveProposalType,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
@@ -359,7 +360,7 @@ describe("unsupported-profile gates (D-11)", () => {
     // client (leaf 0) is the elected committer for. Before WR-06 the
     // post-batch auto-commit called send(), which threw
     // UnsupportedGroupProfileError out of the ingest generator.
-    const stateWithSelfRemove = {
+    const stateWithSelfRemove: ClientState = {
       ...neitherState,
       unappliedProposals: {
         staged: {

@@ -1,9 +1,0 @@
-# UI-audit captures — never commit
-*.png
-*.webp
-*.jpg
-*.jpeg
-*.gif
-*.bmp
-*.tiff
-interaction/

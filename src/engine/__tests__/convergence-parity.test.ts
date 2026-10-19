@@ -381,6 +381,7 @@ describe("CONV-04 convergence parity (D-16) — own-commit protection + dual-ord
     engine.history.bindStore(store);
 
     const first = await engine.send({ kind: "selfUpdate" });
+    if (first.kind !== "selfUpdate") throw new Error("expected self-update");
     engine.confirmPublished(first.pending);
     expect(Number(engine.state.groupContext.epoch)).toBe(2);
 
@@ -397,11 +398,13 @@ describe("CONV-04 convergence parity (D-16) — own-commit protection + dual-ord
         add: { keyPackage: joiningKp.publicPackage },
       },
     });
+    if (proposal.kind !== "proposal") throw new Error("expected proposal");
     engine.confirmPublished(proposal.pending);
     const [proposalRef] = Object.keys(engine.state.unappliedProposals);
     expect(proposalRef).toBeDefined();
 
     const second = await engine.send({ kind: "selfUpdate" });
+    if (second.kind !== "selfUpdate") throw new Error("expected self-update");
     expect(second.pending.ownCommitStamp?.priority).toBe("privileged");
     expect(
       second.pending.ownCommitStamp?.consumedProposalRefs.map(bytesToBase64),

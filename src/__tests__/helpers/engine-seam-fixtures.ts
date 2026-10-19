@@ -21,6 +21,7 @@ import {
   encode,
   getCiphersuiteImpl,
   joinGroup,
+  type MlsFramedMessage,
   type MlsMessage,
   mlsMessageEncoder,
   type Proposal,
@@ -221,7 +222,7 @@ export async function buildAdmin1PerspectiveChain(
     authService: typeof unsafeTestingAuthenticationService;
   },
   rootState: ClientState,
-  commitMessages: MlsMessage[],
+  commitMessages: MlsFramedMessage[],
 ): Promise<ClientState[]> {
   const states: ClientState[] = [];
   let current = rootState;

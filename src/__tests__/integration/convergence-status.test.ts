@@ -1,4 +1,4 @@
-import { EventSigner } from "applesauce-core";
+import type { EventSigner } from "applesauce-core";
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import {
   CiphersuiteImpl,
@@ -24,7 +24,7 @@ import { createCredential } from "../../core/credential.js";
 import { createGroupEvent } from "../../core/group-message.js";
 import { createSimpleGroup } from "../../core/group.js";
 import { generateKeyPackage } from "../../core/key-package.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import { testAccount } from "../helpers/test-accounts.js";
 
 const RELAY = "wss://relay.test";
@@ -40,7 +40,7 @@ function recordingNetwork(published: NostrEvent[]): NostrNetworkInterface {
     },
     publish: async (_relays, event) => {
       published.push(event);
-      return { [RELAY]: { ok: true } as PublishResponse };
+      return { [RELAY]: { from: RELAY, ok: true } satisfies PublishResponse };
     },
     getUserInboxRelays: async () => {
       throw new Error("not used");
@@ -82,7 +82,7 @@ function controllableScheduler() {
 
 function marmotGroup(
   state: ClientState,
-  pubkey: string,
+  signer: EventSigner,
   impl: CiphersuiteImpl,
   published: NostrEvent[],
   now: () => number,
@@ -93,7 +93,7 @@ function marmotGroup(
 ) {
   return new MarmotGroup(state, {
     store: new InMemoryKeyValueStore<SerializedClientState>(),
-    signer: { getPublicKey: async () => pubkey } as EventSigner,
+    signer,
     ciphersuite: impl,
     network: recordingNetwork(published),
     now,
@@ -146,7 +146,8 @@ describe("convergence status (B5, increment 2)", () => {
       ],
       ratchetTreeExtension: true,
     });
-    const welcomeMsg = welcome!.welcome ?? (welcome as never);
+    if (!welcome) throw new Error("expected the Add commit Welcome");
+    const welcomeMsg = welcome.welcome;
     const dEpoch1 = await joinGroup({
       context: ctx,
       welcome: welcomeMsg,
@@ -186,7 +187,13 @@ describe("convergence status (B5, increment 2)", () => {
 
     const clock = fakeClock(100_000);
     const published: NostrEvent[] = [];
-    const dGroup = marmotGroup(dEpoch1, dPubkey, impl, published, clock.now);
+    const dGroup = marmotGroup(
+      dEpoch1,
+      dAccount.signer,
+      impl,
+      published,
+      clock.now,
+    );
 
     // A freshly loaded group has no pending convergence input -> Settled.
     expect(dGroup.convergenceStatus).toBe(convergenceStatuses.settled);
@@ -252,7 +259,8 @@ describe("convergence status (B5, increment 2)", () => {
       ],
       ratchetTreeExtension: true,
     });
-    const welcomeMsg = welcome!.welcome ?? (welcome as never);
+    if (!welcome) throw new Error("expected the Add commit Welcome");
+    const welcomeMsg = welcome.welcome;
     const dEpoch1 = await joinGroup({
       context: ctx,
       welcome: welcomeMsg,
@@ -278,7 +286,7 @@ describe("convergence status (B5, increment 2)", () => {
     const published: NostrEvent[] = [];
     const dGroup = marmotGroup(
       dEpoch1,
-      dPubkey,
+      dAccount.signer,
       impl,
       published,
       clock.now,

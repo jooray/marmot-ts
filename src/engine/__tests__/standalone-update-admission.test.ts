@@ -21,7 +21,11 @@ import {
   defaultProposalTypes,
   getCiphersuiteImpl,
   joinGroup,
+  leafNodeSources,
   nodeTypes,
+  type ClientState,
+  type LeafNodeUpdate,
+  type MlsContext,
   type Proposal,
   unsafeTestingAuthenticationService,
 } from "ts-mls";
@@ -169,9 +173,29 @@ function rejectionReasons(sink: MemoryAuditSink): string[] {
   );
 }
 
+async function genuineUpdateLeaf(
+  context: MlsContext,
+  state: ClientState,
+): Promise<LeafNodeUpdate> {
+  const { message } = await createUpdateProposal({
+    context,
+    state,
+    wireAsPublicMessage: true,
+  });
+  if (
+    !("publicMessage" in message) ||
+    message.publicMessage.content.contentType !== contentTypes.proposal
+  )
+    throw new Error("expected a proposal-framed message");
+  const proposal = message.publicMessage.content.proposal;
+  if (!("update" in proposal)) throw new Error("expected an Update proposal");
+  return proposal.update.leafNode;
+}
+
 describe("standalone Update admission (UPD-04, D-09/D-10)", () => {
   it("UPD-04: the engine refuses a raw Update proposal intent whose leaf carries no 0x8009 support or data, throwing before createProposal", async () => {
-    const { impl, adminPubkey, adminEpoch1 } = await fourPartyEpoch1Group();
+    const { impl, ctx, adminPubkey, adminEpoch1 } =
+      await fourPartyEpoch1Group();
     const peeler = testPeeler(impl);
     const engine = new MarmotGroupEngine({
       state: adminEpoch1,
@@ -185,7 +209,11 @@ describe("standalone Update admission (UPD-04, D-09/D-10)", () => {
     if (adminNode?.nodeType !== nodeTypes.leaf)
       throw new Error("expected a leaf node at the admin's index");
 
-    const strippedLeaf = stripLeafAccountIdentityProof(adminNode.leaf);
+    const freshLeaf = await genuineUpdateLeaf(ctx, adminEpoch1);
+    const strippedLeaf: LeafNodeUpdate = {
+      ...stripLeafAccountIdentityProof(freshLeaf),
+      leafNodeSource: leafNodeSources.update,
+    };
     const rawUpdate: Proposal = {
       proposalType: defaultProposalTypes.update,
       update: { leafNode: strippedLeaf },
@@ -208,7 +236,7 @@ describe("standalone Update admission (UPD-04, D-09/D-10)", () => {
   });
 
   it("UPD-04: the engine refuses a raw Update proposal intent whose leaf credential identity is not the local client's, with proofReason member-identity-changed", async () => {
-    const { impl, adminPubkey, admin2Pubkey, adminEpoch1 } =
+    const { impl, ctx, adminPubkey, admin2Pubkey, adminEpoch1, admin2Epoch1 } =
       await fourPartyEpoch1Group();
     const peeler = testPeeler(impl);
     const engine = new MarmotGroupEngine({
@@ -228,11 +256,11 @@ describe("standalone Update admission (UPD-04, D-09/D-10)", () => {
 
     // The local client is `adminEpoch1`'s own leaf (adminPubkey); the local
     // propose gate always names the local client as sender. This proposal
-    // instead carries admin2's genuine, validly-proofed leaf -- a fabricated
+    // instead carries admin2's genuine, validly-proofed update leaf -- a fabricated
     // identity swap through a locally-built raw proposal intent.
     const rawUpdate: Proposal = {
       proposalType: defaultProposalTypes.update,
-      update: { leafNode: admin2Node.leaf },
+      update: { leafNode: await genuineUpdateLeaf(ctx, admin2Epoch1) },
     };
 
     const beforeEpoch = Number(engine.state.groupContext.epoch);
@@ -286,8 +314,9 @@ describe("standalone Update admission (UPD-04, D-09/D-10)", () => {
       wireAsPublicMessage: true,
     });
     if (
-      genuine.message.publicMessage?.content.contentType !==
-      contentTypes.proposal
+      !("publicMessage" in genuine.message) ||
+      genuine.message.publicMessage.content.contentType !==
+        contentTypes.proposal
     )
       throw new Error("expected a proposal-framed message");
     const genuineProposal = genuine.message.publicMessage.content.proposal;
@@ -296,9 +325,10 @@ describe("standalone Update admission (UPD-04, D-09/D-10)", () => {
       !("update" in genuineProposal)
     )
       throw new Error("expected an Update proposal");
-    const strippedLeaf = stripLeafAccountIdentityProof(
-      genuineProposal.update.leafNode,
-    );
+    const strippedLeaf: LeafNodeUpdate = {
+      ...stripLeafAccountIdentityProof(genuineProposal.update.leafNode),
+      leafNodeSource: leafNodeSources.update,
+    };
     const rawUpdate: Proposal = {
       proposalType: defaultProposalTypes.update,
       update: { leafNode: strippedLeaf },

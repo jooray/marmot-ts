@@ -210,7 +210,9 @@ describe("bounded convergence scheduling", () => {
   });
 
   it("does not let a newly queued intent steal the settlement slot", () => {
-    const queue = [{ intent: { kind: "applicationMessage" as const } }];
+    const queue: Array<
+      Parameters<typeof selectFairQueuedStateIntent>[0][number]
+    > = [{ intent: { kind: "applicationMessage" } }];
     const settledQueueLength = queue.length;
     queue.push({ intent: { kind: "commit" as const } });
     expect(

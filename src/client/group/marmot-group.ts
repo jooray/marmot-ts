@@ -10,8 +10,10 @@ import {
   defaultCryptoProvider,
   encode,
   mlsMessageEncoder,
+  protocolVersions,
   Proposal,
   Welcome,
+  wireformats,
 } from "ts-mls";
 
 import type { ProposalAction, ProposalContext } from "../../engine/types.js";
@@ -44,6 +46,7 @@ import {
   type KeyPackageEligibility,
 } from "../../core/key-package-eligibility.js";
 import { GroupRuntime } from "../runtime/group-runtime.js";
+import { linkPublicationRetention } from "../runtime/publication-retention.js";
 import type {
   GroupPublishResult,
   GroupSessionSendIntent,
@@ -133,6 +136,13 @@ export type DisbandResult =
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+/** One process-local recipient obligation shared by fanout and retry settlement. */
+type FoundingWelcomeDelivery = {
+  recipient: WelcomeRecipient;
+  outcome?: WelcomeDeliveryOutcome;
+  retry?: Promise<WelcomeDeliveryOutcome>;
+};
 
 export type {
   DispositionedIngestResult,
@@ -231,8 +241,8 @@ export type MarmotGroupOptions<
    * `ClientState` deserialize just to check. Deliberately NOT a field grafted
    * onto the serialized `ClientState`: `ClientState` stays exactly what
    * ts-mls produces, and the marker is independently readable/clearable
-   * (see `#clearRemovalMarker`, used by plan 03-07's CONV-03 rewind-supersede
-   * path). When omitted, realization degrades to in-memory-only — it still
+   * (cleared by the session after validated durable exact-anchor recovery).
+   * When omitted, realization degrades to in-memory-only — it still
    * fires exactly once per process, but does not survive a restart.
    */
   removedMarkerStore?: GenericKeyValueStore<boolean>;
@@ -284,13 +294,13 @@ export type MarmotGroupOptions<
   scheduler?: ConvergenceScheduler;
   /**
    * The bounded convergence window, derived from the history tree on load. Set
-   * by the loader ({@link GroupRegistry}); not part of the public construction
+   * by the internal loader (`GroupRegistry`); not part of the public construction
    * API.
    */
   retained?: RetainedHistoryStore;
   /**
-   * A full-fork history tree rehydrated from {@link rewindStore} on load. Set by
-   * the loader ({@link GroupRegistry}); not part of the public construction API.
+   * A full-fork history tree rehydrated from the `rewindStore` option on load. Set by
+   * the internal loader (`GroupRegistry`); not part of the public construction API.
    */
   historyTree?: GroupHistoryTree;
 };
@@ -318,7 +328,7 @@ export type MarmotGroupEvents<
    * decides when to call {@link MarmotGroup.destroy} to purge it.
    */
   removed: (group: MarmotGroup<THistory, TMedia>) => void;
-  /** Emitted once, after durable terminal notification delivery is recorded. */
+  /** At-most-once callback attempt after its durable record, when storage exists. */
   disbanded: (
     group: MarmotGroup<THistory, TMedia>,
     evidence: GroupDisbandedEvent,
@@ -328,7 +338,7 @@ export type MarmotGroupEvents<
   /**
    * Emitted when the fork-history tree grew during ingest — a new commit or a
    * newly observed fork branch. Fires even when the canonical state is
-   * unchanged (a superseded fork still adds nodes). Read {@link forkTreeView}
+   * unchanged (a superseded fork still adds nodes). Read {@link MarmotGroup.forkTreeView}
    * to re-render.
    */
   historyChanged: (group: MarmotGroup<THistory, TMedia>) => void;
@@ -423,15 +433,12 @@ export class MarmotGroup<
    * {@link welcomeDeliveries} / {@link pendingWelcomes} for the accepted R-04
    * consequence.
    */
-  #welcomeDeliveries: WelcomeDeliveryOutcome[] = [];
-  /**
-   * The founding Welcome retained solely to support {@link retryWelcome}.
-   * In-memory only (D-04) — lost on restart, at which point `retryWelcome`
-   * throws rather than silently no-opping.
-   */
-  #foundingWelcome?: Welcome;
-  /** The author pubkey the retained founding Welcome was addressed from. */
-  #foundingWelcomeAuthor?: string;
+  #foundingWelcome?: {
+    welcome: Welcome;
+    author: string;
+    encoded?: string;
+    deliveries: FoundingWelcomeDelivery[];
+  };
 
   private log: Debugger;
 
@@ -569,9 +576,7 @@ export class MarmotGroup<
   /** Public absorbing status; Unrecoverable deliberately remains active/repairable. */
   get status(): MarmotGroupStatus {
     if (this.session.terminalTombstone) return "disbanded";
-    return this.state.groupActiveState.kind === "removedFromGroup"
-      ? "removed"
-      : "active";
+    return this.session.removalBlocked ? "removed" : "active";
   }
 
   /**
@@ -716,7 +721,11 @@ export class MarmotGroup<
    * accepted consequence of D-04 + D-10 + D-12, not an oversight (R-04).
    */
   get welcomeDeliveries(): readonly WelcomeDeliveryOutcome[] {
-    return this.#welcomeDeliveries.slice();
+    return (
+      this.#foundingWelcome?.deliveries.flatMap((delivery) =>
+        delivery.outcome ? [delivery.outcome] : [],
+      ) ?? []
+    );
   }
 
   /**
@@ -730,9 +739,17 @@ export class MarmotGroup<
    * (refs/marmot/protocol-core/publish-lifecycle.md lines 66-78).
    */
   get pendingWelcomes(): readonly WelcomeDeliveryOutcome[] {
-    return this.#welcomeDeliveries.filter(
+    return this.welcomeDeliveries.filter(
       (outcome) => outcome.kind === "failed",
     );
+  }
+
+  #settleWelcomeDelivery(
+    delivery: FoundingWelcomeDelivery,
+    outcome: WelcomeDeliveryOutcome,
+  ): WelcomeDeliveryOutcome {
+    if (delivery.outcome?.kind !== "succeeded") delivery.outcome = outcome;
+    return delivery.outcome;
   }
 
   /**
@@ -742,6 +759,10 @@ export class MarmotGroup<
    * publish path entirely, since a founding Add has no `GroupPublishWork` to
    * drive. Retains the Welcome and author so a failed recipient can be
    * retried later via {@link retryWelcome}.
+   * Fanout and retry settlement preserve success for the same encoded Welcome,
+   * author, recipient and KeyPackage event id. A replacement obligation has
+   * independent outcomes and retry work; older attempts settle only their own
+   * obligation. The report follows the most recently started fanout's order.
    *
    * Never throws and never saves: partial or total Welcome failure is a
    * normal outcome (D-12), reported through {@link pendingWelcomes} rather
@@ -757,16 +778,52 @@ export class MarmotGroup<
     author: string;
     recipients: WelcomeRecipient[];
   }): Promise<readonly WelcomeDeliveryOutcome[]> {
-    this.#foundingWelcome = options.welcome;
-    this.#foundingWelcomeAuthor = options.author;
+    let encoded: string | undefined;
+    try {
+      encoded = bytesToHex(
+        encode(mlsMessageEncoder, {
+          version: protocolVersions.mls10,
+          wireformat: wireformats.mls_welcome,
+          welcome: options.welcome,
+        }),
+      );
+    } catch {
+      // Leave malformed Welcomes to the transport's per-recipient failure
+      // handling; they cannot reuse a previous obligation's success.
+    }
+    const previous = this.#foundingWelcome;
+    const sameWelcome =
+      encoded !== undefined &&
+      previous?.encoded === encoded &&
+      previous.author === options.author;
+    const deliveries = options.recipients.map(
+      (recipient): FoundingWelcomeDelivery =>
+        (sameWelcome
+          ? previous.deliveries.find(
+              (delivery) =>
+                delivery.recipient.pubkey === recipient.pubkey &&
+                delivery.recipient.keyPackageEventId ===
+                  recipient.keyPackageEventId,
+            )
+          : undefined) ?? { recipient },
+    );
+    // Capture recipient records before awaiting transport. Pending attempts
+    // retain their own record even when a different obligation replaces it.
+    this.#foundingWelcome = {
+      welcome: options.welcome,
+      author: options.author,
+      encoded,
+      deliveries,
+    };
     const outcomes = await this.runtime.welcomeDelivery.deliverMany({
       welcome: options.welcome,
       author: options.author,
       groupRelays: this.relays ?? [],
       recipients: options.recipients,
     });
-    this.#welcomeDeliveries = outcomes;
-    return outcomes;
+    return outcomes.map((outcome, index) =>
+      this.#settleWelcomeDelivery(deliveries[index]!, outcome),
+    );
   }
 
   /**
@@ -775,7 +832,8 @@ export class MarmotGroup<
    * retained (for instance after a restart) — this fails loudly rather than
    * silently no-opping, since a silent no-op is exactly R-04's failure mode.
    * When the matching entry already succeeded, returns it unchanged without
-   * performing another delivery.
+   * performing another delivery. Overlapping retries share one attempt per
+   * recipient; failed or rejected attempts clear so a later call can retry.
    *
    * Deliberately has **no epoch guard**: RESEARCH Priority Finding #1
    * establishes that a late epoch-1 Welcome is safe because the joiner's
@@ -785,29 +843,37 @@ export class MarmotGroup<
    * precondition always holds.
    */
   async retryWelcome(pubkey: string): Promise<WelcomeDeliveryOutcome> {
-    const index = this.#welcomeDeliveries.findIndex(
-      (outcome) => outcome.recipient.pubkey === pubkey,
+    const founding = this.#foundingWelcome;
+    const delivery = founding?.deliveries.find(
+      (delivery) => delivery.recipient.pubkey === pubkey,
     );
-    if (
-      index === -1 ||
-      !this.#foundingWelcome ||
-      !this.#foundingWelcomeAuthor
-    ) {
+    if (!founding?.author || !delivery?.outcome) {
       throw new Error(
         `retryWelcome: no retained founding Welcome delivery outcome for recipient ${pubkey}`,
       );
     }
-    const existing = this.#welcomeDeliveries[index]!;
+    const existing = delivery.outcome;
     if (existing.kind === "succeeded") return existing;
 
-    const [outcome] = await this.runtime.welcomeDelivery.deliverMany({
-      welcome: this.#foundingWelcome,
-      author: this.#foundingWelcomeAuthor,
+    const inFlight = delivery.retry;
+    if (inFlight) return inFlight;
+
+    const options = {
+      welcome: founding.welcome,
+      author: founding.author,
       groupRelays: this.relays ?? [],
       recipients: [existing.recipient],
-    });
-    this.#welcomeDeliveries[index] = outcome!;
-    return outcome!;
+    };
+    // Defer transport execution until the shared promise is installed, including
+    // before a transport hook can synchronously reenter retryWelcome.
+    const attempt = Promise.resolve()
+      .then(() => this.runtime.welcomeDelivery.deliverMany(options))
+      .then(([outcome]) => this.#settleWelcomeDelivery(delivery, outcome!))
+      .finally(() => {
+        if (delivery.retry === attempt) delivery.retry = undefined;
+      });
+    delivery.retry = attempt;
+    return attempt;
   }
 
   constructor(
@@ -880,7 +946,7 @@ export class MarmotGroup<
       getRelays: () => this.relays,
       getGroupRef: () => this.idStr,
       getGroupData: () => this.groupData,
-      assertOpen: () => this.session.assertOpen(),
+      assertOpen: () => this.session.assertOutboundOpen(),
       confirmPublished: (pending) => this.session.confirmPublished(pending),
       publishFailed: (pending) => this.session.publishFailed(pending),
       save: () => this.save(),
@@ -888,6 +954,7 @@ export class MarmotGroup<
       audit: options.audit,
       auditContext: options.auditContext,
     });
+    linkPublicationRetention(this.runtime, this.session);
     this.mediaService = new GroupMediaService({
       media: this.media,
       getState: () => this.state,
@@ -896,6 +963,7 @@ export class MarmotGroup<
     });
     this.image = new GroupImageService({
       getState: () => this.state,
+      getRetainedStates: () => this.session.retainedStates(),
       isClosed: () => this.closedSignal.aborted || this.session.destroyed,
     });
   }
@@ -931,12 +999,18 @@ export class MarmotGroup<
     await this.#realizeRemovalIfNeeded();
   }
 
-  /** Realizes durable terminal notification exactly once across restarts. */
+  /** Consumes a durable at-most-once callback attempt; projection is authority. */
   async realizeDisbandIfNeeded(): Promise<void> {
     if (this.closedSignal.aborted) return;
+    if (this.session.terminalTombstone)
+      for (const result of await this.session.driveConvergence()) {
+        await this.#applyRemovalWithdrawal(result);
+        this.emit("ingestResult", result);
+      }
     const tombstone = await this.session.markDisbandNotificationDelivered();
     if (!tombstone) return;
-    this.dispose();
+    this.#closeController.abort();
+    this.image.close();
     this.#rejectQueuedOutbound(new GroupTerminalError());
     this.#emitDisbandedSafely(tombstone);
   }
@@ -974,6 +1048,25 @@ export class MarmotGroup<
    */
   async save(force = false) {
     await this.session.save(force);
+    // The canonical media view omits selectable sibling and exactly pinned
+    // branches. Load the actual tree membership before releasing owned images.
+    // Cache cleanup is optional: failed or changing captures defer retirement
+    // without turning an already successful durable save into a failure.
+    if (this.closedSignal.aborted || this.session.destroyed) return;
+    const tags = this.forkTree.tags();
+    try {
+      const states = await Promise.all(
+        tags.map((tag) => this.forkTree.stateAt(tag)),
+      );
+      if (
+        states.some((state) => !state) ||
+        tags.join() !== this.forkTree.tags().join()
+      )
+        return;
+      this.image.retireRetained(states as ClientState[]);
+    } catch {
+      // Retry on a later successful save; never infer absence from read failure.
+    }
   }
 
   /**
@@ -1092,6 +1185,9 @@ export class MarmotGroup<
     intent: GroupSessionSendIntent,
   ): Promise<GroupPublishResult[]> {
     this.#assertNotDisbanded();
+    await this.session.hydrateLifecycleEvidence();
+    if (this.session.removalBlocked)
+      throw new Error("Group removed or removal recovery pending");
     // Snapshot immutable expected-parent evidence before a convergence wait.
     intent = { ...intent };
     const signal = intent.kind === "commit" ? intent.signal : undefined;
@@ -1291,6 +1387,7 @@ export class MarmotGroup<
    * request mid-session, so both resume paths share one predicate.
    */
   async resumePendingDisband(): Promise<void> {
+    if (this.session.removalBlocked) return;
     if (this.session.destroyed) return;
     // D-12: nothing is published automatically for a group outside the current
     // account identity proof profile. `MarmotGroupEngine.requestDisband` now
@@ -1343,6 +1440,7 @@ export class MarmotGroup<
   }
 
   async #performRemovalRealization(): Promise<void> {
+    if (this.session.terminalTombstone) return;
     if (this.state.groupActiveState.kind !== "removedFromGroup") return;
 
     if (this.#removedMarkerStore) {
@@ -1351,6 +1449,7 @@ export class MarmotGroup<
       );
       if (alreadyRealized) return;
       await this.#removedMarkerStore.setItem(this.#removedMarkerKey, true);
+      await this.session.markRemovalNotificationDelivered();
     } else {
       // No persisted marker configured: realization degrades to in-memory
       // only — still idempotent within this process, but not restart-durable
@@ -1374,22 +1473,6 @@ export class MarmotGroup<
         this.log("removed listener failed: %o", error);
       }
     }
-  }
-
-  /**
-   * Clears the persisted removed-inactive marker (D-12). Called from
-   * {@link destroy} so a fully-purged group never leaves a stale marker
-   * entry behind. Plan 03-07 (CONV-03) adds a second call site: when a later
-   * rewind supersedes the removing commit and re-establishes canonical
-   * membership, so a subsequent removal can realize again instead of being
-   * permanently suppressed by a stale marker.
-   */
-  async #clearRemovalMarker(): Promise<void> {
-    if (!this.#removedMarkerStore) {
-      this.#removalRealizedInMemory = false;
-      return;
-    }
-    await this.#removedMarkerStore.removeItem(this.#removedMarkerKey);
   }
 
   /**
@@ -1548,8 +1631,7 @@ export class MarmotGroup<
       return;
     }
 
-    this.log("rewind superseded our removal — clearing removal marker");
-    await this.#clearRemovalMarker();
+    await this.session.finishRemovalRecovery();
   }
 
   /**

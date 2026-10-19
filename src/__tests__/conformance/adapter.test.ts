@@ -1,4 +1,4 @@
-import manifestJson from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/manifest.v1.json";
+import manifestJson from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/manifest.v1.json" with { type: "json" };
 import { bytesToHex } from "@noble/hashes/utils.js";
 import {
   defaultCryptoProvider,
@@ -11,7 +11,10 @@ import { vi } from "vitest";
 import { createCredential } from "../../core/credential.js";
 import { createSimpleGroup } from "../../core/group.js";
 import { generateKeyPackage } from "../../core/key-package.js";
-import { serializeClientState } from "../../core/client-state.js";
+import {
+  serializeClientState,
+  type SerializedClientState,
+} from "../../core/client-state.js";
 import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import { MarmotGroup } from "../../client/group/marmot-group.js";
 import { GroupRegistry } from "../../client/group-registry.js";
@@ -181,15 +184,17 @@ describe("conformance adapter", () => {
     );
     const network = new MockNetwork();
     network.autoDeliver = false;
-    const store = new InMemoryKeyValueStore();
+    const store = new InMemoryKeyValueStore<SerializedClientState>();
     const ingestStateStore = new InMemoryKeyValueStore<Uint8Array>();
     const rewindStore = new InMemoryKeyValueStore<Uint8Array>();
-    const signer = { getPublicKey: async () => pubkey } as never;
+    const lifecycleStore = new InMemoryKeyValueStore<Uint8Array>();
+    const signer = account.signer;
     const makeGroup = (state = clientState) =>
       new MarmotGroup(state, {
         store,
         ingestStateStore,
         rewindStore,
+        lifecycleStore,
         signer,
         ciphersuite: impl,
         network,
@@ -204,6 +209,7 @@ describe("conformance adapter", () => {
       store,
       ingestStateStore,
       rewindStore,
+      lifecycleStore,
       signer,
       network,
     });

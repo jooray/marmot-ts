@@ -1,7 +1,14 @@
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import { unlockGiftWrap } from "applesauce-common/helpers/gift-wrap";
 import type { NostrEvent } from "applesauce-core/helpers/event";
-import { defaultCryptoProvider, getCiphersuiteImpl } from "ts-mls";
+import {
+  defaultCryptoProvider,
+  getCiphersuiteImpl,
+  encode,
+  mlsMessageEncoder,
+  protocolVersions,
+  wireformats,
+} from "ts-mls";
 import type { CiphersuiteImpl } from "ts-mls";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -21,7 +28,7 @@ import {
   readWelcomeGroupInfo,
   readWelcomeMarmotGroupView,
 } from "../welcome.js";
-import type { StoredKeyPackage } from "../../client/key-package-manager.js";
+import { encodeContent } from "../../utils/encoding.js";
 import { MockNetwork } from "../../__tests__/helpers/mock-network.js";
 import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 
@@ -156,8 +163,8 @@ describe("spec compliance (welcome delivery)", () => {
 // ---------------------------------------------------------------------------
 
 describe("readWelcomeGroupInfo / readWelcomeMarmotGroupView", () => {
-  let adminAccount: PrivateKeyAccount<any>;
-  let inviteeAccount: PrivateKeyAccount<any>;
+  let adminAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
+  let inviteeAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
   let ciphersuite: CiphersuiteImpl;
   let mockNetwork: MockNetwork;
   let adminClient: MarmotClient;
@@ -252,6 +259,20 @@ describe("readWelcomeGroupInfo / readWelcomeMarmotGroupView", () => {
     expect(groupInfo.groupContext.epoch).toBeGreaterThanOrEqual(1n);
     // extensions are present
     expect(groupInfo.groupContext.extensions.length).toBeGreaterThan(0);
+
+    // A real, decodable GroupInfo is still the wrong MLS container for a
+    // Welcome rumor; the positive read above proves the control is genuine.
+    const groupInfoContent = encodeContent(
+      encode(mlsMessageEncoder, {
+        version: protocolVersions.mls10,
+        wireformat: wireformats.mls_group_info,
+        groupInfo,
+      }),
+      "base64",
+    );
+    expect(() =>
+      getWelcome({ ...welcomeRumor, content: groupInfoContent }),
+    ).toThrow(/welcome/i);
   });
 
   it("reads MarmotGroupView from a welcome rumor without joining the group", async () => {

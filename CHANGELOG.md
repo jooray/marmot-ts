@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+Future changes will be recorded here.
+
+## 0.6.0
+
+Prepared release notes; publication has not occurred. This npm version includes account-proof, group-image, and reliability changes delivered across the project milestones; it is separate from the v2.2 reliability-and-debt-closure milestone.
+
+### Changed
+
+- Packed installations validate all ten supported code entrypoints using isolated production consumers, including NodeNext and bundler type imports. The default MLS ciphersuite works without any of the five optional cryptographic backends or an upstream `ts-mls` installation; install an optional backend only when selecting its ciphersuite. Import the bundled fork through `/mls`. Strict consumer checks use `skipLibCheck: true` and do not promise dependency-wide declaration validation.
+
+- Named public signature types improve typed consumers and API reference coverage; `pnpm typecheck:tests` now checks every source test and helper independently of runtime tests. For publisher options, import `GenerateKeyPackageOptions` from `@internet-privacy/marmot-ts/client`; root and `/core` imports retain the existing core generator type. These exports are type-only, with unchanged runtime exports. See [Client](docs/client/marmot-client.md#key-package-management) and [Storage upgrades](docs/client/storage.md#upgrading-existing-stores) for import and checkpoint guidance.
+
+- Release publication dependencies after conclusive rollback, confirmation, or rejected preparation before effects reach a publisher, including cancelled Commits and leave proposals. Finite recovery retention can then contract; returned application work and retryable publication failures keep their source pinned until acknowledgement.
+
+- Keep lifecycle enablement admitted through asynchronous MLS preparation and wrapping, preventing settled retention from interrupting an in-flight enablement send.
+
+- Preserve staged resumption-PSK receivers on every selectable recovery source, so valid competing Commits remain replayable after retention and restart. Receivers are released once their source and unfinished dependencies expire.
+
+- Expired application messages remain stale when their source snapshot is retained for recovery, including explicit `Infinity`, even after the separate application receiver window releases old keys. Authentication uses an independent retained copy and preserves live ratchets.
+
+- Long-lived groups using the default finite window now release obsolete recovery snapshots, duplicate identities, completed delivery evidence and private plaintext cache copies after convergence settles, while preserving eligible forks and unfinished recovery, publication and retraction work. Pending work can temporarily exceed the horizon; explicit `Infinity` keeps historical recovery material without widening the application decryption window. Application rumor history and custom media remain application-controlled.
+
+- Existing generic stores are read by the updated loader and upgraded through checkpoint/evidence metadata with restartable exact-key cleanup. Preserve the recovery and ingestion stores together, keep single-value writes atomic and coordinate separate writers; no key renaming or store clearing is required. After a version-2 tree checkpoint is saved, use the updated loader rather than downgrading to an older one. See [Storage](docs/client/storage.md#retention-checkpoint-and-restart-repair) for adapter requirements and migration limits.
+
 - Cancelling an image replacement or closing its image service now stops queued and preparing MLS image changes before publication, while ordinary group operations remain usable. Image changes already being published retain their publication outcome.
 
 - Keep verified image bytes intact when a cache entry is replaced or evicted while a read is awaiting contact policy; cancelled and closed reads release their private plaintext.
@@ -42,6 +66,19 @@
 
 ### Fixed
 
+- Removal recovery uses the authenticated committer tie-breaker for retained branches and removal evidence, matching normal fork selection. Older removal records remain conservative when their committer identity is unavailable.
+
+- Restored groups can decrypt media from intermediate epochs on their recovered canonical branch immediately, using the existing bounded retained-key window.
+
+- Disband cleanup waits for already-started history writes before purging plaintext, so overlapping sends cannot recreate deleted history after terminal selection.
+
+- Recover removed membership only through an authenticated winning retained branch, keeping sends blocked until durable recovery completes. Canonical disband now fences sends immediately and repairs interrupted terminal persistence after restart without deleting unfinished effects or history retractions in shared stores. Configure durable lifecycle, removal-marker, ingestion and rewind stores for restart recovery; callback attempts can still be lost around a crash.
+
+- Concurrent founding Welcome retries for the same recipient share one delivery while other recipients proceed independently. Successful outcomes remain successful without redelivery even when a concurrent founding fanout later fails; failed attempts permit a later explicit retry. Changed Welcomes, authors or recipient KeyPackages start independent delivery obligations, protected from older attempts.
+- Founding Add preparation refuses with a clear retryable error after engine-mediated state or lifecycle mutation history, or a proposal edit still present after proposal resolution or real commit construction, before staging or adopting output. Refusal preserves intervening canonical and pending work. `ClientState` remains caller-mutable: direct nested proposal edits fully restored before both checkpoints are outside the guarantee; do not mutate returned state during an in-flight founding operation.
+
+- Classify public and private MLS commits and proposals correctly, and sort mixed-carriage commits by their actual source epoch and canonical MLS-message digest without changing the input array. Ordering now explicitly rejects unsupported wire formats and negative or unsafe epochs.
+
 - Reject malformed encrypted group-image metadata in Welcome invitations before saving a group or consuming its single-use KeyPackage, including optional image components. Valid present and cleared images remain supported.
 
 - Closing a group-image service also cancels active uploads and queued image changes, wipes owned plaintext buffers, and prevents late callbacks from delivering an image after closure.
@@ -67,6 +104,8 @@
 - Keep admin restrictions enforced when optional group metadata is malformed, and reject invalid group component updates before applying them.
 
 ### Breaking changes
+
+- Successful `isCommitMessage` and `isProposalMessage` guards now narrow to a public/private union. Consumers that read `privateMessage` directly after a guard must branch on `message.wireformat`: use `publicMessage.content` for `mls_public_message` and `privateMessage` for `mls_private_message`. `isApplicationMessage` remains private-only.
 
 - Reusable KeyPackages require the canonical empty-data `0x0004` component in the KeyPackage dictionary; legacy-only `0x000a` markers are deliberately rejected. Generate and republish current packages. Publications omit relay tags; destinations are retained locally across restarts for rotation and purge. Older route-less records need explicit rotation routes or locally supplied tracking routes for cleanup.
 - Publication identifiers (`clientId`, `identifier`, and rotation `d`) must be exactly 64 lowercase hex characters and invalid values reject before side effects. Generate 32 random bytes once, encode as lowercase hex and persist that slot instead of a device label. Publish under the new slot, then delete the old publication through known routes: a different `d` does not replace the old address. See the [publication slot migration](docs/core/key-packages.md#publication-slot-migration) for the create/purge and rotation paths.

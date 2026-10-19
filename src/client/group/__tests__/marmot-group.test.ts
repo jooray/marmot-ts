@@ -8,12 +8,26 @@ import {
   defaultProposalTypes,
   getCiphersuiteImpl,
   getAppDataDictionary,
+  isDefaultExtension,
   joinGroup,
   makeAppDataDictionaryExtension,
   processMessage,
   unsafeTestingAuthenticationService,
   type Proposal,
   type Welcome,
+  type GroupContextExtension,
+  type LeafNodeExtension,
+  type MlsMessage,
+  type MlsFramedMessage,
+  wireformats,
+  protocolVersions,
+  leafNodeSources,
+  makeCustomExtension,
+  type LeafNodeKeyPackage,
+  type CustomExtension,
+  type IncomingMessageCallback,
+  type LeafIndex,
+  type ProposalAdd,
 } from "ts-mls";
 import { describe, expect, it, vi } from "vitest";
 
@@ -33,6 +47,8 @@ import {
   validateKeyPackageAccountIdentityProof,
 } from "../../../core/components/index.js";
 import { createCredential } from "../../../core/credential.js";
+import { defaultCapabilities } from "../../../core/default-capabilities.js";
+import { createDefaultKeyPackageLifetime } from "../../../utils/timestamp.js";
 import { createSimpleGroup } from "../../../core/group.js";
 import {
   decodeComponentsList,
@@ -46,7 +62,7 @@ import {
 import { encodeGroupProfileV1 } from "../../../core/components/group-profile.js";
 import { createGroupEvent } from "../../../core/group-message.js";
 import { generateKeyPackage } from "../../../core/key-package.js";
-import { InMemoryKeyValueStore } from "../../../extra";
+import { InMemoryKeyValueStore } from "../../../extra/in-memory-key-value-store.js";
 import type {
   NostrNetworkInterface,
   PublishResponse,
@@ -57,7 +73,10 @@ import {
   MarmotGroup,
 } from "../marmot-group.js";
 import { testAccount } from "../../../__tests__/helpers/test-accounts.js";
-import type { WelcomeRecipient } from "../../transport/nostr/welcome-delivery.js";
+import type {
+  WelcomeDeliveryOutcome,
+  WelcomeRecipient,
+} from "../../transport/nostr/welcome-delivery.js";
 import { GROUP_BLOSSOM_IMAGE_COMPONENT_ID } from "../../../core/components/ids.js";
 import { GroupsManager } from "../../groups-manager.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -72,6 +91,37 @@ function deferred<T>() {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+function requireFramedMessage(message: MlsMessage): MlsFramedMessage {
+  if (
+    message.wireformat !== wireformats.mls_public_message &&
+    message.wireformat !== wireformats.mls_private_message
+  )
+    throw new Error("expected a framed MLS message");
+  return message;
+}
+
+type ProofPolicyCommit = Extract<
+  Parameters<IncomingMessageCallback>[0],
+  { kind: "commit" }
+> & { proposals: { proposal: ProposalAdd; senderLeafIndex: number }[] };
+
+function proofPolicyLeaf(
+  pubkey: string,
+  signaturePublicKey: Uint8Array,
+  extensions: CustomExtension[],
+): LeafNodeKeyPackage {
+  return {
+    credential: createCredential(pubkey),
+    hpkePublicKey: new Uint8Array(32),
+    signaturePublicKey,
+    capabilities: defaultCapabilities(),
+    leafNodeSource: leafNodeSources.key_package,
+    lifetime: createDefaultKeyPackageLifetime(),
+    signature: new Uint8Array(64),
+    extensions,
+  };
 }
 
 async function imageOwner(maxPendingImageMutations?: number) {
@@ -109,7 +159,7 @@ function uploadDescriptor(request: GroupImageTransportRequest) {
 }
 
 async function createTestGroupState(
-  account: PrivateKeyAccount<any>,
+  account: ReturnType<typeof PrivateKeyAccount.fromKey>,
   ciphersuiteImpl: CiphersuiteImpl,
 ) {
   const adminPubkey = account.pubkey;
@@ -683,8 +733,8 @@ describe("MarmotGroup lifecycle (group-state.md)", () => {
       if (change === "profile")
         vi.spyOn(group.session, "profileSupport", "get").mockReturnValue({
           kind: "unsupported",
-          proofReason: "missing-required-proof",
-        } as never);
+          proofReason: "missing-requirement",
+        });
       else group.dispose();
       release();
       await rejected;
@@ -996,10 +1046,17 @@ describe("MarmotGroup lifecycle (group-state.md)", () => {
       ],
     });
     const legacy = added.newState;
-    const withoutLifecycle = (
-      extensions: typeof legacy.groupContext.extensions,
-    ) =>
-      extensions.map((extension) => {
+    function withoutLifecycle(
+      extensions: GroupContextExtension[],
+    ): GroupContextExtension[];
+    function withoutLifecycle(
+      extensions: LeafNodeExtension[],
+    ): LeafNodeExtension[];
+    function withoutLifecycle(
+      extensions: (GroupContextExtension | LeafNodeExtension)[],
+    ) {
+      return extensions.map((extension) => {
+        if (isDefaultExtension(extension)) return extension;
         const dictionary = getAppDataDictionary([extension]);
         if (!dictionary) return extension;
         const entries = dictionary
@@ -1018,6 +1075,7 @@ describe("MarmotGroup lifecycle (group-state.md)", () => {
           );
         return makeAppDataDictionaryExtension(entries);
       });
+    }
     legacy.groupContext.extensions = withoutLifecycle(
       legacy.groupContext.extensions,
     );
@@ -1043,7 +1101,6 @@ describe("MarmotGroup lifecycle (group-state.md)", () => {
 
   it("publishes disband intent once and keeps the durable request pending", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -1073,7 +1130,6 @@ describe("MarmotGroup lifecycle (group-state.md)", () => {
 
   it("retains disband intent and rolls staged state back on publish failure", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -1103,7 +1159,6 @@ describe("MarmotGroup lifecycle (group-state.md)", () => {
 
   it("reports lifecycle enablement idempotently through the public facade", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -1294,7 +1349,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
       signer: nonAdminAccount.signer,
     });
 
-    const addProposal = {
+    const addProposal: Proposal = {
       proposalType: defaultProposalTypes.add,
       add: { keyPackage: nonAdminKeyPackage.publicPackage },
     };
@@ -1318,7 +1373,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
         cipherSuite: impl,
         authService: unsafeTestingAuthenticationService,
       },
-      welcome: (welcome as any).welcome ?? (welcome as any),
+      welcome: welcome!.welcome,
       keyPackage: nonAdminKeyPackage.publicPackage,
       privateKeys: nonAdminKeyPackage.privatePackage,
       ratchetTree: undefined,
@@ -1335,7 +1390,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
       ciphersuiteImpl: impl,
       signer: thirdAccount.signer,
     });
-    const nonAdminAddProposal = {
+    const nonAdminAddProposal: Proposal = {
       proposalType: defaultProposalTypes.add,
       add: { keyPackage: thirdKeyPackage.publicPackage },
     };
@@ -1355,7 +1410,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
     const store = new InMemoryKeyValueStore<SerializedClientState>();
     await store.setItem(
       bytesToHex(adminStateEpoch1.groupContext.groupId),
-      adminStateEpoch1 as any,
+      serializeClientState(adminStateEpoch1),
     );
 
     const network: NostrNetworkInterface = {
@@ -1400,7 +1455,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
         authService: unsafeTestingAuthenticationService,
       },
       state: group.state,
-      message: nonAdminCommit as any,
+      message: requireFramedMessage(nonAdminCommit),
       callback: adminCallback,
     });
 
@@ -1431,27 +1486,28 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
     const tampered = proof.slice();
     tampered[tampered.length - 1] ^= 0xff; // forge
 
-    const forgedLeaf = {
-      credential: createCredential(account.pubkey),
-      signaturePublicKey: mlsKey,
-      extensions: [makeLeafAppComponentsExtension(tampered)],
-    };
-    const incoming = {
-      kind: "commit" as const,
-      senderLeafIndex: 0,
+    const forgedLeaf = proofPolicyLeaf(account.pubkey, mlsKey, [
+      makeLeafAppComponentsExtension(tampered),
+    ]);
+    const incoming: ProofPolicyCommit = {
+      kind: "commit",
+      senderLeafIndex: 0 as LeafIndex,
       proposals: [
         {
           proposal: {
             proposalType: defaultProposalTypes.add,
             add: {
               keyPackage: {
+                version: protocolVersions.mls10,
+                initKey: new Uint8Array(32),
+                signature: new Uint8Array(64),
                 cipherSuite: impl.id,
                 leafNode: forgedLeaf,
                 extensions: [],
               },
             },
           },
-          senderLeafIndex: 0,
+          senderLeafIndex: 0 as LeafIndex,
         },
       ],
     };
@@ -1459,13 +1515,13 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
     // The committer is an admin (would otherwise be accepted); the forged proof
     // is rejected regardless, before the admin short-circuit.
     const callback = createAdminCommitPolicyCallback({
-      ratchetTree: [] as never,
+      ratchetTree: [],
       adminPubkeys: [account.pubkey],
       ciphersuiteId: impl.id,
       onUnverifiableCommit: "reject",
     });
 
-    expect(callback(incoming as never)).toBe("reject");
+    expect(callback(incoming)).toBe("reject");
   });
 
   it("rejects an Add whose proof material is only at the KeyPackage level, matching the invite seam (WR-01)", async () => {
@@ -1485,27 +1541,28 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
     });
 
     // The leaf itself carries no proof material at all.
-    const bareLeaf = {
-      credential: createCredential(account.pubkey),
-      signaturePublicKey: mlsKey,
-      extensions: [],
-    };
-    const addCommit = (keyPackageExtensions: unknown[]) => ({
+    const bareLeaf = proofPolicyLeaf(account.pubkey, mlsKey, []);
+    const addCommit = (
+      keyPackageExtensions: CustomExtension[],
+    ): ProofPolicyCommit => ({
       kind: "commit" as const,
-      senderLeafIndex: 0,
+      senderLeafIndex: 0 as LeafIndex,
       proposals: [
         {
           proposal: {
             proposalType: defaultProposalTypes.add,
             add: {
               keyPackage: {
+                version: protocolVersions.mls10,
+                initKey: new Uint8Array(32),
+                signature: new Uint8Array(64),
                 cipherSuite: impl.id,
                 leafNode: bareLeaf,
                 extensions: keyPackageExtensions,
               },
             },
           },
-          senderLeafIndex: 0,
+          senderLeafIndex: 0 as LeafIndex,
         },
       ],
     });
@@ -1514,7 +1571,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
     // unverifiable, and "retry" makes that path throw instead of returning. So a
     // returned "reject" can only come from the proof gate itself.
     const callback = createAdminCommitPolicyCallback({
-      ratchetTree: [] as never,
+      ratchetTree: [],
       adminPubkeys: [account.pubkey],
       ciphersuiteId: impl.id,
       onUnverifiableCommit: "retry",
@@ -1522,9 +1579,12 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
 
     // Legacy 0xf2f1 extension at the KeyPackage level.
     const legacyAtKeyPackage = addCommit([
-      { extensionType: 0xf2f1, extensionData: new Uint8Array([1]) },
+      makeCustomExtension({
+        extensionType: 0xf2f1,
+        extensionData: new Uint8Array([1]),
+      }),
     ]);
-    expect(callback(legacyAtKeyPackage as never)).toBe("reject");
+    expect(callback(legacyAtKeyPackage)).toBe("reject");
 
     // A 0x8009 dictionary entry misplaced at the KeyPackage level.
     const proofAtKeyPackage = addCommit([
@@ -1534,13 +1594,13 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
         ]),
       ),
     ]);
-    expect(callback(proofAtKeyPackage as never)).toBe("reject");
+    expect(callback(proofAtKeyPackage)).toBe("reject");
 
     // Both KeyPackages are rejected by the invite seam's validator too.
     for (const incoming of [legacyAtKeyPackage, proofAtKeyPackage]) {
       expect(() =>
         validateKeyPackageAccountIdentityProof(
-          incoming.proposals[0]!.proposal.add.keyPackage as never,
+          incoming.proposals[0]!.proposal.add.keyPackage,
           impl.id,
         ),
       ).toThrow(AccountIdentityProofError);
@@ -1548,7 +1608,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
 
     // Control: per D-08, an Add with no proof material anywhere is rejected by
     // the same validator that gates the invite seam, not skipped.
-    expect(callback(addCommit([]) as never)).toBe("reject");
+    expect(callback(addCommit([]))).toBe("reject");
   });
 
   it("accepts non-admin self-update commits (no proposals) (protocol-core/group-messaging.md)", async () => {
@@ -1575,7 +1635,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
       signer: nonAdminAccount.signer,
     });
 
-    const addProposal = {
+    const addProposal: Proposal = {
       proposalType: defaultProposalTypes.add,
       add: { keyPackage: nonAdminKeyPackage.publicPackage },
     };
@@ -1619,7 +1679,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
     const store = new InMemoryKeyValueStore<SerializedClientState>();
     await store.setItem(
       bytesToHex(adminStateEpoch1.groupContext.groupId),
-      adminStateEpoch1 as any,
+      serializeClientState(adminStateEpoch1),
     );
 
     const network: NostrNetworkInterface = {
@@ -1661,7 +1721,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
         authService: unsafeTestingAuthenticationService,
       },
       state: group.state,
-      message: nonAdminSelfUpdateCommit as any,
+      message: requireFramedMessage(nonAdminSelfUpdateCommit),
       callback: adminCallback,
     });
 
@@ -1698,7 +1758,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
       signer: memberAccount.signer,
     });
 
-    const addProposal = {
+    const addProposal: Proposal = {
       proposalType: defaultProposalTypes.add,
       add: { keyPackage: memberKeyPackage.publicPackage },
     };
@@ -1710,7 +1770,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
       },
       state: createdState,
       wireAsPublicMessage: false,
-      extraProposals: [addProposal as any],
+      extraProposals: [addProposal],
       ratchetTreeExtension: true,
     });
 
@@ -1724,7 +1784,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
         cipherSuite: impl,
         authService: unsafeTestingAuthenticationService,
       },
-      welcome: (welcome as any).welcome ?? (welcome as any),
+      welcome: welcome!.welcome,
       keyPackage: memberKeyPackage.publicPackage,
       privateKeys: memberKeyPackage.privatePackage,
       ratchetTree: undefined,
@@ -1743,7 +1803,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
     const store = new InMemoryKeyValueStore<SerializedClientState>();
     await store.setItem(
       bytesToHex(memberStateEpoch1.groupContext.groupId),
-      memberStateEpoch1 as any,
+      serializeClientState(memberStateEpoch1),
     );
 
     const network: NostrNetworkInterface = {
@@ -1785,7 +1845,7 @@ describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", ()
         authService: unsafeTestingAuthenticationService,
       },
       state: group.state,
-      message: adminCommit as any,
+      message: requireFramedMessage(adminCommit),
       callback: adminCallback,
     });
 
@@ -1831,6 +1891,48 @@ describe("MarmotGroup founding Welcome delivery report (D-04/D-10/D-12/R-04, FOU
       network,
     });
     return { group, adminAccount };
+  }
+
+  async function makeFailedGroup(recipients: WelcomeRecipient[]) {
+    const network = new MockNetwork(["wss://relay.test"]);
+    const owner = await makeGroup(network);
+    vi.spyOn(network, "getUserInboxRelays").mockResolvedValue([]);
+    await owner.group.deliverFoundingWelcomes({
+      welcome: WELCOME,
+      author: owner.adminAccount.pubkey,
+      recipients,
+    });
+    expect(owner.group.pendingWelcomes).toHaveLength(recipients.length);
+    return owner;
+  }
+
+  function succeeded(recipient: WelcomeRecipient): WelcomeDeliveryOutcome {
+    return {
+      kind: "succeeded",
+      recipient,
+      response: {
+        "wss://relay.test": { from: "wss://relay.test", ok: true },
+      },
+    };
+  }
+
+  function changedObligation(
+    change: "Welcome" | "author" | "KeyPackage",
+    author: string,
+    recipient: WelcomeRecipient,
+  ) {
+    return {
+      welcome:
+        change === "Welcome"
+          ? { ...WELCOME, encryptedGroupInfo: new Uint8Array([5, 6, 7, 8]) }
+          : WELCOME,
+      author: change === "author" ? testAccount(1).pubkey : author,
+      recipients: [
+        change === "KeyPackage"
+          ? makeRecipient(recipient.pubkey, "b".repeat(64))
+          : recipient,
+      ],
+    };
   }
 
   it("reports one entry per recipient and no pending entries when every delivery succeeds", async () => {
@@ -1925,6 +2027,481 @@ describe("MarmotGroup founding Welcome delivery report (D-04/D-10/D-12/R-04, FOU
     expect(outcome.kind).toBe("succeeded");
     expect(deliverManySpy).not.toHaveBeenCalled();
   });
+
+  it("same-recipient overlapping retries share one delivery and its succeeded outcome", async () => {
+    const network = new MockNetwork(["wss://relay.test"]);
+    const { group, adminAccount } = await makeGroup(network);
+    const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    vi.spyOn(network, "getUserInboxRelays").mockResolvedValue([]);
+    await group.deliverFoundingWelcomes({
+      welcome: WELCOME,
+      author: adminAccount.pubkey,
+      recipients: [recipient],
+    });
+    expect(group.pendingWelcomes).toHaveLength(1);
+
+    const started = deferred<void>();
+    const delivery = deferred<WelcomeDeliveryOutcome[]>();
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockImplementation(() => {
+        started.resolve();
+        return delivery.promise;
+      });
+    const first = group.retryWelcome(recipient.pubkey);
+    const second = group.retryWelcome(recipient.pubkey);
+    await started.promise;
+    expect(deliverMany).toHaveBeenCalledTimes(1);
+    expect(deliverMany).toHaveBeenCalledWith({
+      welcome: WELCOME,
+      author: adminAccount.pubkey,
+      groupRelays: ["wss://relay.test"],
+      recipients: [recipient],
+    });
+    const outcome: WelcomeDeliveryOutcome = {
+      kind: "succeeded",
+      recipient,
+      response: {
+        "wss://relay.test": { from: "wss://relay.test", ok: true },
+      },
+    };
+    delivery.resolve([outcome]);
+
+    expect(await Promise.all([first, second])).toEqual([outcome, outcome]);
+    expect(group.welcomeDeliveries).toEqual([outcome]);
+    expect(group.pendingWelcomes).toEqual([]);
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      outcome,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("same-recipient retries share failure, clear it, and retain a later success", async () => {
+    const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    const { group } = await makeFailedGroup([recipient]);
+    const started = deferred<void>();
+    const delivery = deferred<WelcomeDeliveryOutcome[]>();
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockImplementationOnce(() => {
+        started.resolve();
+        return delivery.promise;
+      });
+    const first = group.retryWelcome(recipient.pubkey);
+    const second = group.retryWelcome(recipient.pubkey);
+    await started.promise;
+    expect(deliverMany).toHaveBeenCalledTimes(1);
+    const failure: WelcomeDeliveryOutcome = {
+      kind: "failed",
+      recipient,
+      error: "No relay accepted the Welcome",
+    };
+    delivery.resolve([failure]);
+    expect(await Promise.all([first, second])).toEqual([failure, failure]);
+    expect(group.welcomeDeliveries).toEqual([failure]);
+    expect(group.pendingWelcomes).toEqual([failure]);
+
+    const success = succeeded(recipient);
+    deliverMany.mockResolvedValueOnce([success]);
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      success,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+    expect(group.welcomeDeliveries).toEqual([success]);
+    expect(group.pendingWelcomes).toEqual([]);
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      success,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("same-recipient retries clear an unexpectedly rejected delivery before a later attempt", async () => {
+    const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    const { group } = await makeFailedGroup([recipient]);
+    const retained = [...group.welcomeDeliveries];
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const failure = new Error("unexpected transport rejection");
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockImplementationOnce(async () => {
+        started.resolve();
+        await release.promise;
+        throw failure;
+      });
+    const first = group.retryWelcome(recipient.pubkey);
+    const second = group.retryWelcome(recipient.pubkey);
+    const settled = Promise.allSettled([first, second]);
+    await started.promise;
+    expect(deliverMany).toHaveBeenCalledTimes(1);
+    release.resolve();
+    expect(await settled).toEqual([
+      { status: "rejected", reason: failure },
+      { status: "rejected", reason: failure },
+    ]);
+    expect(group.welcomeDeliveries).toEqual(retained);
+    expect(group.pendingWelcomes).toEqual(retained);
+
+    const success = succeeded(recipient);
+    deliverMany.mockResolvedValueOnce([success]);
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      success,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+    expect(group.welcomeDeliveries).toEqual([success]);
+    expect(group.pendingWelcomes).toEqual([]);
+  });
+
+  it("clears a synchronously thrown delivery so a later explicit retry can succeed", async () => {
+    const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    const { group } = await makeFailedGroup([recipient]);
+    const retained = [...group.welcomeDeliveries];
+    const failure = new Error("synchronous transport failure");
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockImplementationOnce(() => {
+        throw failure;
+      });
+    await expect(group.retryWelcome(recipient.pubkey)).rejects.toBe(failure);
+    expect(group.welcomeDeliveries).toEqual(retained);
+    expect(group.pendingWelcomes).toEqual(retained);
+
+    const success = succeeded(recipient);
+    deliverMany.mockResolvedValueOnce([success]);
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      success,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+    expect(group.welcomeDeliveries).toEqual([success]);
+    expect(group.pendingWelcomes).toEqual([]);
+  });
+
+  it("same-recipient synchronous transport reentry joins the installed attempt", async () => {
+    const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    const { group } = await makeFailedGroup([recipient]);
+    const started = deferred<void>();
+    let reentered: Promise<WelcomeDeliveryOutcome> | undefined;
+    const delivery = deferred<WelcomeDeliveryOutcome[]>();
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockImplementationOnce(() => {
+        reentered = group.retryWelcome(recipient.pubkey);
+        started.resolve();
+        return delivery.promise;
+      });
+    const first = group.retryWelcome(recipient.pubkey);
+    await started.promise;
+    expect(reentered).toBeDefined();
+    expect(deliverMany).toHaveBeenCalledTimes(1);
+    const success = succeeded(recipient);
+    delivery.resolve([success]);
+    expect(await Promise.all([first, reentered!])).toEqual([success, success]);
+    expect(deliverMany).toHaveBeenCalledTimes(1);
+    expect(group.welcomeDeliveries).toEqual([success]);
+    expect(group.pendingWelcomes).toEqual([]);
+  });
+
+  it("different recipients retry independently and a late failure cannot alter another success", async () => {
+    const firstRecipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    const secondRecipient = makeRecipient(
+      testAccount(1).pubkey,
+      "b".repeat(64),
+    );
+    const { group } = await makeFailedGroup([firstRecipient, secondRecipient]);
+    const firstRetained = group.welcomeDeliveries[0]!;
+    const firstStarted = deferred<void>();
+    const secondStarted = deferred<void>();
+    const firstDelivery = deferred<WelcomeDeliveryOutcome[]>();
+    const secondDelivery = deferred<WelcomeDeliveryOutcome[]>();
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockImplementation(({ recipients }) => {
+        if (recipients[0]!.pubkey === firstRecipient.pubkey) {
+          firstStarted.resolve();
+          return firstDelivery.promise;
+        }
+        secondStarted.resolve();
+        return secondDelivery.promise;
+      });
+    const first = group.retryWelcome(firstRecipient.pubkey);
+    await firstStarted.promise;
+    const second = group.retryWelcome(secondRecipient.pubkey);
+    await secondStarted.promise;
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+    expect(
+      deliverMany.mock.calls.map(([options]) => options.recipients),
+    ).toEqual([[firstRecipient], [secondRecipient]]);
+    const secondSuccess = succeeded(secondRecipient);
+    secondDelivery.resolve([secondSuccess]);
+    await expect(second).resolves.toEqual(secondSuccess);
+    expect(group.welcomeDeliveries).toEqual([firstRetained, secondSuccess]);
+    expect(group.pendingWelcomes).toEqual([firstRetained]);
+    await expect(group.retryWelcome(secondRecipient.pubkey)).resolves.toEqual(
+      secondSuccess,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+
+    const firstFailure: WelcomeDeliveryOutcome = {
+      kind: "failed",
+      recipient: firstRecipient,
+      error: "first recipient unreachable",
+    };
+    firstDelivery.resolve([firstFailure]);
+    await expect(first).resolves.toEqual(firstFailure);
+    expect(group.welcomeDeliveries).toEqual([firstFailure, secondSuccess]);
+    expect(group.pendingWelcomes).toEqual([firstFailure]);
+  });
+
+  it("a late failed retry preserves and returns an already retained recipient success", async () => {
+    const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    const { group, adminAccount } = await makeFailedGroup([recipient]);
+    const started = deferred<void>();
+    const delivery = deferred<WelcomeDeliveryOutcome[]>();
+    const success = succeeded(recipient);
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockImplementationOnce(() => {
+        started.resolve();
+        return delivery.promise;
+      })
+      .mockResolvedValueOnce([success]);
+    const retry = group.retryWelcome(recipient.pubkey);
+    await started.promise;
+    // An independently completed public delivery retains success while the
+    // older retry is still blocked. Its later failure must not downgrade it.
+    await group.deliverFoundingWelcomes({
+      welcome: WELCOME,
+      author: adminAccount.pubkey,
+      recipients: [recipient],
+    });
+    expect(group.welcomeDeliveries).toEqual([success]);
+    expect(group.pendingWelcomes).toEqual([]);
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      success,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+
+    delivery.resolve([{ kind: "failed", recipient, error: "late failure" }]);
+    await expect(retry).resolves.toEqual(success);
+    expect(group.welcomeDeliveries).toEqual([success]);
+    expect(group.pendingWelcomes).toEqual([]);
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      success,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("a late failed fanout preserves and returns an already retained retry success", async () => {
+    const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    const { group, adminAccount } = await makeFailedGroup([recipient]);
+    const delivery = deferred<WelcomeDeliveryOutcome[]>();
+    const success = succeeded(recipient);
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockReturnValueOnce(delivery.promise)
+      .mockResolvedValueOnce([success]);
+    const fanout = group.deliverFoundingWelcomes({
+      welcome: WELCOME,
+      author: adminAccount.pubkey,
+      recipients: [recipient],
+    });
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      success,
+    );
+    expect(group.welcomeDeliveries).toEqual([success]);
+    expect(group.pendingWelcomes).toEqual([]);
+
+    delivery.resolve([
+      { kind: "failed", recipient, error: "late fanout failure" },
+    ]);
+    await expect(fanout).resolves.toEqual([success]);
+    expect(group.welcomeDeliveries).toEqual([success]);
+    expect(group.pendingWelcomes).toEqual([]);
+    await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+      success,
+    );
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("same encoded Welcome fanout preserves success and the supplied recipient order", async () => {
+    const first = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+    const second = makeRecipient(testAccount(1).pubkey, "b".repeat(64));
+    const { group, adminAccount } = await makeFailedGroup([first, second]);
+    const success = succeeded(first);
+    const secondFailure: WelcomeDeliveryOutcome = {
+      kind: "failed",
+      recipient: second,
+      error: "second unreachable",
+    };
+    const deliverMany = vi
+      .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+      .mockResolvedValueOnce([success])
+      .mockResolvedValueOnce([
+        secondFailure,
+        { kind: "failed", recipient: first, error: "first late failure" },
+      ]);
+    await group.retryWelcome(first.pubkey);
+
+    await expect(
+      group.deliverFoundingWelcomes({
+        welcome: {
+          ...WELCOME,
+          encryptedGroupInfo: WELCOME.encryptedGroupInfo.slice(),
+        },
+        author: adminAccount.pubkey,
+        recipients: [second, { ...first }],
+      }),
+    ).resolves.toEqual([secondFailure, success]);
+    expect(group.welcomeDeliveries).toEqual([secondFailure, success]);
+    expect(group.pendingWelcomes).toEqual([secondFailure]);
+    await expect(group.retryWelcome(first.pubkey)).resolves.toEqual(success);
+    expect(deliverMany).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["Welcome", "author", "KeyPackage"] as const)(
+    "a changed %s obligation does not inherit a completed recipient success",
+    async (change) => {
+      const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+      const { group, adminAccount } = await makeFailedGroup([recipient]);
+      const replacement = changedObligation(
+        change,
+        adminAccount.pubkey,
+        recipient,
+      );
+      const replacementRecipient = replacement.recipients[0]!;
+      const failure: WelcomeDeliveryOutcome = {
+        kind: "failed",
+        recipient: replacementRecipient,
+        error: "new obligation failed",
+      };
+      const success = succeeded(replacementRecipient);
+      const deliverMany = vi
+        .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+        .mockResolvedValueOnce([succeeded(recipient)])
+        .mockResolvedValueOnce([failure])
+        .mockResolvedValueOnce([success]);
+      await group.retryWelcome(recipient.pubkey);
+      await expect(group.deliverFoundingWelcomes(replacement)).resolves.toEqual(
+        [failure],
+      );
+      expect(group.welcomeDeliveries).toEqual([failure]);
+      expect(group.pendingWelcomes).toEqual([failure]);
+      await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+        success,
+      );
+      expect(deliverMany).toHaveBeenCalledTimes(3);
+      expect(deliverMany).toHaveBeenLastCalledWith({
+        ...replacement,
+        groupRelays: group.relays,
+      });
+    },
+  );
+
+  it.each(["Welcome", "author", "KeyPackage"] as const)(
+    "a changed %s obligation starts its own retry while an older retry is pending",
+    async (change) => {
+      const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+      const { group, adminAccount } = await makeFailedGroup([recipient]);
+      const replacement = changedObligation(
+        change,
+        adminAccount.pubkey,
+        recipient,
+      );
+      const replacementRecipient = replacement.recipients[0]!;
+      const failure: WelcomeDeliveryOutcome = {
+        kind: "failed",
+        recipient: replacementRecipient,
+        error: "new obligation failed",
+      };
+      const oldStarted = deferred<void>();
+      const newStarted = deferred<void>();
+      const oldDelivery = deferred<WelcomeDeliveryOutcome[]>();
+      const newDelivery = deferred<WelcomeDeliveryOutcome[]>();
+      const deliverMany = vi
+        .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+        .mockImplementationOnce(() => {
+          oldStarted.resolve();
+          return oldDelivery.promise;
+        })
+        .mockResolvedValueOnce([failure])
+        .mockImplementationOnce(() => {
+          newStarted.resolve();
+          return newDelivery.promise;
+        });
+      const oldRetry = group.retryWelcome(recipient.pubkey);
+      await oldStarted.promise;
+      await group.deliverFoundingWelcomes(replacement);
+      const newRetry = group.retryWelcome(recipient.pubkey);
+      // Flush the deferred retry transport start without a timeout or a wait
+      // on a barrier that the broken pubkey-only implementation cannot reach.
+      await Promise.resolve();
+      expect(deliverMany).toHaveBeenCalledTimes(3);
+      await newStarted.promise;
+      expect(deliverMany).toHaveBeenLastCalledWith({
+        ...replacement,
+        groupRelays: group.relays,
+      });
+
+      const oldSuccess = succeeded(recipient);
+      oldDelivery.resolve([oldSuccess]);
+      await expect(oldRetry).resolves.toEqual(oldSuccess);
+      expect(group.welcomeDeliveries).toEqual([failure]);
+      expect(group.pendingWelcomes).toEqual([failure]);
+      const joinedNewRetry = group.retryWelcome(recipient.pubkey);
+      await Promise.resolve();
+      expect(deliverMany).toHaveBeenCalledTimes(3);
+      const success = succeeded(replacementRecipient);
+      newDelivery.resolve([success]);
+      expect(await Promise.all([newRetry, joinedNewRetry])).toEqual([
+        success,
+        success,
+      ]);
+      expect(group.welcomeDeliveries).toEqual([success]);
+      expect(group.pendingWelcomes).toEqual([]);
+      await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+        success,
+      );
+      expect(deliverMany).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it.each(["Welcome", "author", "KeyPackage"] as const)(
+    "a late older fanout cannot overwrite a changed %s obligation or inherit its success",
+    async (change) => {
+      const recipient = makeRecipient(testAccount(0).pubkey, "a".repeat(64));
+      const { group, adminAccount } = await makeFailedGroup([recipient]);
+      const replacement = changedObligation(
+        change,
+        adminAccount.pubkey,
+        recipient,
+      );
+      const success = succeeded(replacement.recipients[0]!);
+      const oldDelivery = deferred<WelcomeDeliveryOutcome[]>();
+      const deliverMany = vi
+        .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+        .mockReturnValueOnce(oldDelivery.promise)
+        .mockResolvedValueOnce([success]);
+      const oldFanout = group.deliverFoundingWelcomes({
+        welcome: WELCOME,
+        author: adminAccount.pubkey,
+        recipients: [recipient],
+      });
+      await group.deliverFoundingWelcomes(replacement);
+      const oldFailure: WelcomeDeliveryOutcome = {
+        kind: "failed",
+        recipient,
+        error: "old obligation failed",
+      };
+      oldDelivery.resolve([oldFailure]);
+      await expect(oldFanout).resolves.toEqual([oldFailure]);
+      expect(group.welcomeDeliveries).toEqual([success]);
+      expect(group.pendingWelcomes).toEqual([]);
+      await expect(group.retryWelcome(recipient.pubkey)).resolves.toEqual(
+        success,
+      );
+      expect(deliverMany).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("a fanout whose deliveries all fail does not throw (D-12)", async () => {
     const mockNetwork = new MockNetwork(["wss://relay.test"]);

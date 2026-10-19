@@ -61,6 +61,7 @@ import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js"
 import type { GenericKeyValueStore } from "../../utils/key-value.js";
 import { MockNetwork } from "../../__tests__/helpers/mock-network.js";
 import { MarmotGroupEngine } from "../../engine/group-engine.js";
+import type { ProposalContext } from "../../engine/types.js";
 import { defaultProposalTypes, type Proposal } from "ts-mls";
 
 const RELAYS = ["wss://mock-relay.test"];
@@ -152,7 +153,10 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
       const originalSend = MarmotGroupEngine.prototype.send;
       const spy = vi
         .spyOn(MarmotGroupEngine.prototype, "send")
-        .mockImplementation(async function (intent) {
+        .mockImplementation(async function (
+          this: MarmotGroupEngine<NostrEvent>,
+          intent,
+        ) {
           if (intent.kind !== "foundingAdd")
             return originalSend.call(this, intent);
           const originalInputs = intent.extraProposals;
@@ -227,7 +231,7 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
     ];
     const { proposeInviteUser } =
       await import("../group/proposals/invite-user.js");
-    await group.propose(async (context) => {
+    await group.propose(async (context: ProposalContext) => {
       const proposals: Proposal[] = [];
       for (const event of events)
         proposals.push(await proposeInviteUser(event)(context));
@@ -549,6 +553,12 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
     // group (refs/marmot/protocol-core/publish-lifecycle.md lines 66-78).
     const reloadedManager = new GroupsManager({
       store: adminGroupStateStore,
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+      ingestPersistence: {
+        kind: "ephemeral",
+        reason: "ingest_state_store_omitted",
+      },
       signer: adminAccount.signer,
       network: mockNetwork,
     });
@@ -627,6 +637,12 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
     const rewindStore = new InMemoryKeyValueStore<Uint8Array>();
     const manager = new GroupsManager({
       store: new InMemoryKeyValueStore<SerializedClientState>(),
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+      ingestPersistence: {
+        kind: "ephemeral",
+        reason: "ingest_state_store_omitted",
+      },
       rewindStore,
       signer: adminAccount.signer,
       network: mockNetwork,

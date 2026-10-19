@@ -8,9 +8,9 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
 
-import invalidDuplicateRelay from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/byte-fixtures/nostr-routing-v1-invalid-duplicate-relay.v1.json";
-import validState from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/byte-fixtures/nostr-routing-v1-valid-state.v1.json";
-import validUpdate from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/byte-fixtures/nostr-routing-v1-valid-update.v1.json";
+import invalidDuplicateRelay from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/byte-fixtures/nostr-routing-v1-invalid-duplicate-relay.v1.json" with { type: "json" };
+import validState from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/byte-fixtures/nostr-routing-v1-valid-state.v1.json" with { type: "json" };
+import validUpdate from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/byte-fixtures/nostr-routing-v1-valid-update.v1.json" with { type: "json" };
 import {
   decodeNostrRoutingV1,
   encodeNostrRoutingV1,

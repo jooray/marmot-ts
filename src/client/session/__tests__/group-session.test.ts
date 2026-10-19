@@ -18,12 +18,13 @@ import { createCredential } from "../../../core/credential.js";
 import { createSimpleGroup } from "../../../core/group.js";
 import { serializeApplicationRumor } from "../../../core/group-message.js";
 import { generateKeyPackage } from "../../../core/key-package.js";
-import { InMemoryKeyValueStore } from "../../../extra";
+import { InMemoryKeyValueStore } from "../../../extra/in-memory-key-value-store.js";
 import { GroupSession } from "../group-session.js";
 import type { UnreadableIngestResult } from "../group-session.js";
 import type { IngestResult as EngineIngestResult } from "../../../engine/types.js";
 import {
   disbandTombstoneKey,
+  disbandTerminalIntentKey,
   encodeDisbandTombstone,
 } from "../../../engine/disband-tombstone.js";
 import { encodeDisbandRequest } from "../../../engine/disband-request.js";
@@ -383,7 +384,9 @@ function makeSession(
   state: import("ts-mls").ClientState,
   impl: CiphersuiteImpl,
   overrides: Partial<
-    import("../group-session.js").GroupSessionOptions<any>
+    import("../group-session.js").GroupSessionOptions<
+      import("../group-session.js").GroupSessionHistory
+    >
   > = {},
 ) {
   return new GroupSession({
@@ -587,9 +590,11 @@ describe("GroupSession send intent effects", () => {
       terminalOutcome: "disbanded",
     });
 
-    expect(operations[0]).toBe(`set:${disbandTombstoneKey(id)}`);
+    expect(operations[0]).toBe(`set:${disbandTerminalIntentKey(id)}`);
     expect(await lifecycleStore.getItem(`${id}/disband/request`)).toBeNull();
-    expect(await ingestStateStore.getItem(`${id}/effect/work`)).toBeNull();
+    expect(await ingestStateStore.getItem(`${id}/effect/work`)).toEqual(
+      new Uint8Array([1]),
+    );
     expect(operations).toContain(`remove-state:${id}`);
   });
 

@@ -6,9 +6,9 @@ Thank you for your interest in contributing to marmot-ts! This document provides
 
 ### Prerequisites
 
-- Node.js LTS (>= 20.x)
-- TypeScript ~5.8.0 (installed via devDependencies)
-- npm or yarn
+- Node.js 20 or newer
+- pnpm 10
+- TypeScript (installed at the lockfile version via devDependencies)
 - Git
 
 ### Setting Up Your Development Environment
@@ -21,7 +21,7 @@ Thank you for your interest in contributing to marmot-ts! This document provides
    ```
 3. Install dependencies:
    ```bash
-   npm install
+   pnpm install --frozen-lockfile
    ```
 4. Create a new branch for your changes:
    ```bash
@@ -32,12 +32,23 @@ Thank you for your interest in contributing to marmot-ts! This document provides
 
 ### Available Scripts
 
-- `npm run build` - Clean and compile the TypeScript code
-- `npm run clean` - Remove the dist directory
-- `npm run compile` - Compile TypeScript files
-- `npm run test` - Run tests with Vitest
-- `npm run format` - Format code with Prettier
-- `npm run prepare` - Set up Husky git hooks
+- `pnpm build` - Clean, build the MLS fork, compile the library, and vendor the fork
+- `pnpm clean` - Remove the dist directory
+- `pnpm compile` - Compile production TypeScript files
+- `pnpm test` - Run Vitest in watch mode
+- `pnpm vitest run` - Run the runtime test suite once
+- `pnpm conformance:extended` - Run the extended conformance suite
+- `pnpm typecheck:tests` - Strictly typecheck all source, test, and helper TypeScript without emitting files
+- `pnpm format` / `pnpm lint` - Format code / check formatting with Prettier
+- `pnpm prepare` - Build the workspace MLS fork (also runs during installation)
+
+`pnpm typecheck:tests` uses `tsconfig.tests.json` to include every `src/**/*.ts`
+file, including runtime tests, the extended conformance spec, and shared helpers.
+It inherits the production compiler's strict, unused-variable, and return checks,
+and resets the production project's test exclusions. Run it explicitly alongside
+runtime tests: `pnpm test` and other test/watch commands do not invoke it.
+CI runs this exact command after frozen dependency installation in the existing
+Node.js 20/22/24 matrix; Bun and Deno continue to run their runtime suites.
 
 ### Making Changes
 
@@ -45,16 +56,22 @@ Thank you for your interest in contributing to marmot-ts! This document provides
 2. Add or update tests for your changes
 3. Run linting and formatting:
    ```bash
-   npm run format
-   npm run lint
+   pnpm format
+   pnpm lint
    ```
-4. Run the test suite to ensure everything passes:
+4. Run the strict source check and runtime test suite:
    ```bash
-   npm test
+   pnpm typecheck:tests
+   pnpm vitest run
+   pnpm conformance:extended
    ```
 5. Build the project to ensure it compiles:
    ```bash
-   npm run build
+   pnpm build
+   ```
+6. After building, check the packed package:
+   ```bash
+   bash scripts/package-smoke/run.sh
    ```
 
 ## Changelog

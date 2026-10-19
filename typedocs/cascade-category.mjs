@@ -1,5 +1,27 @@
 import { readFileSync } from "node:fs";
-import { Comment, CommentTag, Converter } from "typedoc";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Comment, CommentTag, Converter, ReflectionKind } from "typedoc";
+
+const root = fileURLToPath(new URL("../", import.meta.url));
+const pkg = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+);
+const entrypointLabels = new Map(
+  Object.entries(pkg.exports).flatMap(([subpath, target]) => {
+    if (typeof target !== "object" || !target.types?.startsWith("./dist/"))
+      return [];
+    const source = target.types
+      .replace(/^\.\/dist\//, "src/")
+      .replace(/\.d\.ts$/, ".ts");
+    return [
+      [
+        path.resolve(root, source),
+        subpath === "." ? pkg.name : `${pkg.name}${subpath.slice(1)}`,
+      ],
+    ];
+  }),
+);
 
 const fileCategoryCache = new Map();
 
@@ -27,6 +49,12 @@ export function load(app) {
     for (const reflection of Object.values(context.project.reflections)) {
       const file = reflection.sources?.[0]?.fullFileName;
       if (!file) continue;
+      // Display the declared package import path, while retaining the same
+      // reflection IDs, references, sources, and inherited categories.
+      if (reflection.kindOf(ReflectionKind.Module)) {
+        const label = entrypointLabels.get(path.resolve(file));
+        if (label) reflection.name = label;
+      }
       if (reflection.comment?.getTag("@category")) continue;
 
       const category = categoryForFile(file);

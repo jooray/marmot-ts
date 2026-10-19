@@ -132,15 +132,46 @@ Convergence is decided from authenticated MLS bytes only. Relay `created_at`, No
 ### `sortGroupCommits`
 
 ```typescript
-import { sortGroupCommits } from "@internet-privacy/marmot-ts";
+import { sortGroupCommits } from "@internet-privacy/marmot-ts/core";
 
 // Deterministic pre-order: MLS source epoch, then commit_digest
 const sortedPairs = sortGroupCommits(messagePairs);
 ```
 
 ::: warning
-`sortGroupCommits` is a simplified (source epoch, `commit_digest`) pre-order. It does not implement full branch selection. Like `isCommitMessage`, `isProposalMessage` and `isApplicationMessage`, it only understands MLS `PrivateMessage` handshakes. Marmot sends commits and proposals as `PublicMessage`, so these helpers don't classify them (`sortGroupCommits` gives them source epoch 0).
+`sortGroupCommits` is an epoch/digest pre-order. Full Marmot branch convergence additionally evaluates depth, witnesses, priority and authenticated committer criteria. Use `MarmotGroup.ingest()` / `MarmotGroupEngine` to select and apply branches.
 :::
+
+The helper reads the actual source epoch from either `PublicMessage.content` or `PrivateMessage`, then breaks equal-epoch ties with SHA-256 of the canonical encoded MLSMessage bytes. Outer event ids, `created_at`, arrival order and carriage preference do not influence that comparison. It returns a new array, preserves the supplied array's order and keeps the original message pairs.
+
+Ordering throws an explicit error for unsupported wire formats (`Welcome`, `GroupInfo` or `KeyPackage`) and a `RangeError` for negative epochs or epochs above `Number.MAX_SAFE_INTEGER`. Epoch zero and the maximum safe epoch are accepted; invalid input never produces a partial result or an invented epoch-zero order.
+
+### Message classification
+
+`isCommitMessage` and `isProposalMessage` recognize both public and private framed messages and narrow to that carriage union. `isApplicationMessage` remains private-only: public application-shaped content is not classified as an application message. All three guards return `false` for nonframed messages. These guards classify carriage/content type; they do not authenticate MLS content.
+
+After a successful commit or proposal guard, branch on `wireformat` before accessing carriage-specific fields:
+
+```typescript
+import {
+  isCommitMessage,
+  type GroupMessagePair,
+} from "@internet-privacy/marmot-ts/core";
+import { wireformats } from "@internet-privacy/marmot-ts/mls";
+
+function commitSourceEpoch(pair: GroupMessagePair): bigint | undefined {
+  if (!isCommitMessage(pair)) return undefined;
+  return pair.message.wireformat === wireformats.mls_public_message
+    ? pair.message.publicMessage.content.epoch
+    : pair.message.privateMessage.epoch;
+}
+```
+
+`GroupMessagePair` preserves the original Nostr event and MLS message. The guard
+narrows the message to the public/private carriage union; it does not prove a
+commit's authorization or choose its branch. Open **Reference** in the navigation
+for the exported helper signatures and [fork history](/client/fork-history) for
+the engine's authenticated branch selection.
 
 ## Application Messages
 

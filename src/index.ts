@@ -1,5 +1,8 @@
 export * from "./client/index.js";
 export * from "./core/index.js";
+// Preserve the root's core generation options; the client publisher's options
+// are available from the client subpath under the same name.
+export type { GenerateKeyPackageOptions } from "./core/key-package.js";
 export * from "./utils/index.js";
 
 // The engine is a standalone component built on core; expose its full surface
@@ -37,3 +40,8 @@ export type {
   SendResult,
 } from "./engine/types.js";
 export type { AuditContextOptions, AuditSink } from "./audit/index.js";
+export type {
+  DisbandTombstone,
+  DisbandNotificationState,
+} from "./engine/disband-tombstone.js";
+export type { DeliveredAppPayload } from "./engine/delivered-payloads.js";

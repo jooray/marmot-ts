@@ -12,10 +12,8 @@ import {
   createCommit,
   defaultCryptoProvider,
   defaultExtensionTypes,
-  defaultProposalTypes,
   getCiphersuiteImpl,
   selfRemoveProposalType,
-  type CiphersuiteImpl,
   type ExtensionRequiredCapabilities,
 } from "ts-mls";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -136,7 +134,7 @@ function fakeGroupEvent(groupId: Uint8Array): NostrEvent {
     tags: [],
     content: "irrelevant-ciphertext",
     sig: "b".repeat(128),
-  } as unknown as NostrEvent;
+  };
 }
 
 describe("stored groups outside the account identity proof profile (D-11, D-12)", () => {

@@ -1,6 +1,7 @@
 /** @module @category Engine */
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
+/** Whether the authenticated terminal notification still needs delivery. */
 export type DisbandNotificationState = "pending" | "delivered";
 
 /** Authenticated, read-only evidence retained after live MLS state is erased. */
@@ -23,6 +24,48 @@ type StoredDisbandTombstone = {
 
 export function disbandTombstoneKey(groupIdHex: string): string {
   return `${groupIdHex}/disband/terminal`;
+}
+
+/** First durable terminal authority; includes the non-secret repair projection. */
+export interface DisbandTerminalIntent {
+  readonly tombstone: DisbandTombstone;
+  readonly registryState: Uint8Array;
+}
+
+export function disbandTerminalIntentKey(groupIdHex: string): string {
+  return `${groupIdHex}/disband/intent/v1`;
+}
+
+export function encodeDisbandTerminalIntent(
+  intent: DisbandTerminalIntent,
+): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      version: 1,
+      tombstone: JSON.parse(
+        new TextDecoder().decode(encodeDisbandTombstone(intent.tombstone)),
+      ),
+      registryState: bytesToHex(intent.registryState),
+    }),
+  );
+}
+
+export function decodeDisbandTerminalIntent(
+  data: Uint8Array,
+): DisbandTerminalIntent {
+  const record = JSON.parse(new TextDecoder().decode(data));
+  if (
+    record?.version !== 1 ||
+    typeof record.registryState !== "string" ||
+    !record.registryState.length
+  )
+    throw new Error("Invalid disband terminal intent");
+  return {
+    tombstone: decodeDisbandTombstone(
+      new TextEncoder().encode(JSON.stringify(record.tombstone)),
+    ),
+    registryState: hexToBytes(record.registryState),
+  };
 }
 
 /** Non-secret, scrubbed MLS shell used only to construct the terminal facade. */

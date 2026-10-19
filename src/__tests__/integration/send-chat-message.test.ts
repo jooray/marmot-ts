@@ -2,11 +2,6 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import type { Rumor } from "applesauce-common/helpers/gift-wrap";
 import { unlockGiftWrap } from "applesauce-common/helpers/gift-wrap";
-import {
-  CiphersuiteImpl,
-  defaultCryptoProvider,
-  getCiphersuiteImpl,
-} from "ts-mls";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -15,6 +10,7 @@ import {
 } from "../../client/group/application-message.js";
 import type {
   BaseGroupHistory,
+  BaseGroupMedia,
   MarmotGroup,
 } from "../../client/group/marmot-group.js";
 import { MarmotClient } from "../../client/marmot-client.js";
@@ -58,8 +54,11 @@ class TestHistory implements BaseGroupHistory {
  * Helper: build a kind-9 chat rumor and drive it through the group's
  * session/runtime seam (the replacement for the old `group.sendChatMessage`).
  */
-async function sendChat(
-  group: MarmotGroup<any, any>,
+async function sendChat<
+  THistory extends BaseGroupHistory | undefined,
+  TMedia extends BaseGroupMedia | undefined,
+>(
+  group: MarmotGroup<THistory, TMedia>,
   signer: { getPublicKey(): Promise<string> | string },
   content: string,
   tags: string[][] = [],
@@ -73,11 +72,13 @@ async function sendChat(
 }
 
 /** Helper: set up two-member group and return the groups */
-async function setupTwoMemberGroup(
+async function setupTwoMemberGroup<
+  THistory extends BaseGroupHistory | undefined,
+>(
   adminClient: MarmotClient,
-  inviteeClient: MarmotClient,
-  adminAccount: PrivateKeyAccount<any>,
-  inviteeAccount: PrivateKeyAccount<any>,
+  inviteeClient: MarmotClient<THistory>,
+  adminAccount: ReturnType<typeof PrivateKeyAccount.generateNew>,
+  inviteeAccount: ReturnType<typeof PrivateKeyAccount.generateNew>,
   mockNetwork: MockNetwork,
   groupName: string,
 ) {
@@ -118,7 +119,7 @@ async function setupTwoMemberGroup(
 
 /** Helper: collect application rumor messages from admin ingesting all group events */
 async function collectApplicationRumors(
-  adminGroup: MarmotGroup<any, any>,
+  adminGroup: Pick<MarmotGroup, "ingest">,
   mockNetwork: MockNetwork,
   nostrGroupIdHex: string,
 ): Promise<Rumor[]> {
@@ -140,9 +141,8 @@ async function collectApplicationRumors(
 }
 
 describe("chat messages via session/runtime", () => {
-  let adminAccount: PrivateKeyAccount<any>;
-  let inviteeAccount: PrivateKeyAccount<any>;
-  let _ciphersuite: CiphersuiteImpl;
+  let adminAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
+  let inviteeAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
   let mockNetwork: MockNetwork;
   let adminClient: MarmotClient;
   let inviteeClient: MarmotClient;
@@ -151,22 +151,17 @@ describe("chat messages via session/runtime", () => {
     adminAccount = PrivateKeyAccount.generateNew();
     inviteeAccount = PrivateKeyAccount.generateNew();
 
-    _ciphersuite = await getCiphersuiteImpl(
-      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-      defaultCryptoProvider,
-    );
-
     mockNetwork = new MockNetwork();
 
     adminClient = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore(),
+      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: adminAccount.signer,
       network: mockNetwork,
     });
 
     inviteeClient = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore(),
+      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: inviteeAccount.signer,
       network: mockNetwork,
@@ -298,15 +293,14 @@ describe("chat messages via session/runtime", () => {
   });
 
   it("sending multiple messages in sequence does not cause 'desired gen in the past'", async () => {
-    const { adminGroup, inviteeGroup, inviteePubkey } =
-      await setupTwoMemberGroup(
-        adminClient,
-        inviteeClient,
-        adminAccount,
-        inviteeAccount,
-        mockNetwork,
-        "Multi-message Test Group",
-      );
+    const { adminGroup, inviteeGroup } = await setupTwoMemberGroup(
+      adminClient,
+      inviteeClient,
+      adminAccount,
+      inviteeAccount,
+      mockNetwork,
+      "Multi-message Test Group",
+    );
 
     // Send three messages in sequence — each advances the sender's ratchet
     await sendChat(inviteeGroup, inviteeAccount.signer, "Message 1");
@@ -355,7 +349,7 @@ describe("chat messages via session/runtime", () => {
 
     // Create a fresh invitee client that uses our test history factory
     const inviteeClientWithHistory = new MarmotClient<TestHistory>({
-      groupStateStore: new InMemoryKeyValueStore(),
+      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: inviteeAccount.signer,
       network: mockNetwork,

@@ -1,10 +1,11 @@
 import { Rumor } from "applesauce-common/helpers/gift-wrap";
-import { EventSigner } from "applesauce-core";
 import { getEventHash } from "applesauce-core/helpers/event";
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import {
   CiphersuiteImpl,
   type ClientState,
+  type MlsWelcomeMessage,
+  type Welcome,
   clientStateDecoder,
   clientStateEncoder,
   createApplicationMessage,
@@ -33,9 +34,14 @@ import {
 } from "../../core/group-message.js";
 import { createSimpleGroup } from "../../core/group.js";
 import { generateKeyPackage } from "../../core/key-package.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import { testAccount } from "../helpers/test-accounts.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+
+function commitWelcome(message: MlsWelcomeMessage | undefined): Welcome {
+  if (!message) throw new Error("expected the Add commit Welcome");
+  return message.welcome;
+}
 
 async function createTestGroupState(
   adminAccount: PrivateKeyAccount<any>,
@@ -60,7 +66,6 @@ async function createTestGroupState(
 describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messaging.md)", () => {
   it("orders same-epoch commits by content-derived commit_digest, ignoring transport fields", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -141,9 +146,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     const digestA = commitDigest(encode(mlsMessageEncoder, commitA.commit));
     const digestB = commitDigest(encode(mlsMessageEncoder, commitB.commit));
     const lowerFirst =
-      Buffer.compare(Buffer.from(digestA), Buffer.from(digestB)) <= 0
-        ? [a, b]
-        : [b, a];
+      bytesToHex(digestA) <= bytesToHex(digestB) ? [a, b] : [b, a];
 
     // Order is content-derived and independent of input order.
     expect(sortGroupCommits([a, b])).toEqual(lowerFirst);
@@ -152,7 +155,6 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
 
   it("applies exactly one commit for an epoch (convergence picks the winner), even if events arrive reversed", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -204,7 +206,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
         cipherSuite: impl,
         authService: unsafeTestingAuthenticationService,
       },
-      welcome: welcome!.welcome ?? welcome,
+      welcome: commitWelcome(welcome),
       keyPackage: memberKeyPackage.publicPackage,
       privateKeys: memberKeyPackage.privatePackage,
       ratchetTree: undefined,
@@ -285,9 +287,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
       },
     };
 
-    const signer = {
-      getPublicKey: async () => memberPubkey,
-    } as EventSigner;
+    const signer = memberAccount.signer;
 
     const group = new MarmotGroup(memberStateEpoch1, {
       store,
@@ -321,7 +321,6 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
 
   it("recovers from a cross-ingest fork by rewinding to retained state and applying the canonical commit", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -357,7 +356,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     });
     const memberStateEpoch1 = await joinGroup({
       context: ctx,
-      welcome: welcome!.welcome ?? (welcome as never),
+      welcome: commitWelcome(welcome),
       keyPackage: memberKeyPackage.publicPackage,
       privateKeys: memberKeyPackage.privatePackage,
       ratchetTree: undefined,
@@ -378,8 +377,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     // The canonical winner is the lower commit_digest; ingest the loser first.
     const digestA = commitDigest(encode(mlsMessageEncoder, commitA.commit));
     const digestB = commitDigest(encode(mlsMessageEncoder, commitB.commit));
-    const aWins =
-      Buffer.compare(Buffer.from(digestA), Buffer.from(digestB)) < 0;
+    const aWins = bytesToHex(digestA) < bytesToHex(digestB);
     const lower = aWins ? commitA : commitB;
     const higher = aWins ? commitB : commitA;
 
@@ -423,7 +421,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     };
     const group = new MarmotGroup(memberStateEpoch1, {
       store,
-      signer: { getPublicKey: async () => memberPubkey } as EventSigner,
+      signer: memberAccount.signer,
       ciphersuite: impl,
       network,
     });
@@ -455,7 +453,6 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
 
   it("reports a locally sent app payload on an abandoned branch as invalidated on rewind (M7)", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -491,7 +488,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     });
     const memberStateEpoch1 = await joinGroup({
       context: ctx,
-      welcome: welcome!.welcome ?? (welcome as never),
+      welcome: commitWelcome(welcome),
       keyPackage: memberKeyPackage.publicPackage,
       privateKeys: memberKeyPackage.privatePackage,
       ratchetTree: undefined,
@@ -512,8 +509,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     // the higher (losing) branch, then rewinds to the lower one.
     const digestA = commitDigest(encode(mlsMessageEncoder, commitA.commit));
     const digestB = commitDigest(encode(mlsMessageEncoder, commitB.commit));
-    const aWins =
-      Buffer.compare(Buffer.from(digestA), Buffer.from(digestB)) < 0;
+    const aWins = bytesToHex(digestA) < bytesToHex(digestB);
     const lower = aWins ? commitA : commitB;
     const higher = aWins ? commitB : commitA;
 
@@ -571,7 +567,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     };
     const group = new MarmotGroup(memberStateEpoch1, {
       store,
-      signer: { getPublicKey: async () => memberPubkey } as EventSigner,
+      signer: memberAccount.signer,
       ciphersuite: impl,
       network,
     });
@@ -633,7 +629,6 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
 
   it("converges onto a deeper competing branch whose child commit is encrypted under an unreached epoch", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -669,7 +664,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     });
     const memberStateEpoch1 = await joinGroup({
       context: ctx,
-      welcome: welcome!.welcome ?? (welcome as never),
+      welcome: commitWelcome(welcome),
       keyPackage: memberKeyPackage.publicPackage,
       privateKeys: memberKeyPackage.privatePackage,
       ratchetTree: undefined,
@@ -747,7 +742,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     };
     const group = new MarmotGroup(memberStateEpoch1, {
       store,
-      signer: { getPublicKey: async () => memberPubkey } as EventSigner,
+      signer: memberAccount.signer,
       ciphersuite: impl,
       network,
     });
@@ -771,7 +766,6 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
 
   it("converges onto a witnessed branch via app-payload witness quorum, overriding the lower-digest competitor", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -816,7 +810,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
       ],
       ratchetTreeExtension: true,
     });
-    const welcomeMsg = welcome!.welcome ?? (welcome as never);
+    const welcomeMsg = commitWelcome(welcome);
     const cEpoch1 = await joinGroup({
       context: ctx,
       welcome: welcomeMsg,
@@ -849,8 +843,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     // higher digest, so a flip to it can only be the quorum boost at work.
     const digestA = commitDigest(encode(mlsMessageEncoder, commitA.commit));
     const digestB = commitDigest(encode(mlsMessageEncoder, commitB.commit));
-    const aLower =
-      Buffer.compare(Buffer.from(digestA), Buffer.from(digestB)) < 0;
+    const aLower = bytesToHex(digestA) < bytesToHex(digestB);
     const applied = aLower ? commitA : commitB;
     const witnessed = aLower ? commitB : commitA;
 
@@ -924,7 +917,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
     };
     const group = new MarmotGroup(cEpoch1, {
       store,
-      signer: { getPublicKey: async () => cPub } as EventSigner,
+      signer: cAccount.signer,
       ciphersuite: impl,
       network,
     });
@@ -976,11 +969,6 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
       ciphersuiteImpl: impl,
     });
 
-    const addProposal = {
-      proposalType: "add" as const,
-      add: { keyPackage: memberKeyPackage.publicPackage },
-    };
-
     const addProposalTyped = {
       proposalType: defaultProposalTypes.add,
       add: { keyPackage: memberKeyPackage.publicPackage },
@@ -1021,9 +1009,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
       },
     };
 
-    const signer = {
-      getPublicKey: async () => adminPubkey,
-    } as EventSigner;
+    const signer = adminAccount.signer;
 
     const group = new MarmotGroup(adminStateEpoch1, {
       store,
@@ -1050,7 +1036,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
 
     // Send application message through MarmotGroup
     // This should update state for forward secrecy and persist it
-    const { newState, message: mlsMessage } = await createApplicationMessage({
+    const { message: mlsMessage } = await createApplicationMessage({
       context: {
         cipherSuite: impl,
         authService: unsafeTestingAuthenticationService,
@@ -1095,7 +1081,6 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
 
   it("processes proposals before commits (proposal/commit integration)", async () => {
     const adminAccount = testAccount(6);
-    const adminPubkey = adminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
       defaultCryptoProvider,
@@ -1158,9 +1143,7 @@ describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messagi
       },
     };
 
-    const signer = {
-      getPublicKey: async () => adminPubkey,
-    } as EventSigner;
+    const signer = adminAccount.signer;
 
     const group = new MarmotGroup(adminStateEpoch1, {
       store,

@@ -11,14 +11,14 @@ import type { StoredKeyPackage } from "../../client/key-package-manager.js";
 import { SerializedClientState } from "../../core/client-state.js";
 import { ADDRESSABLE_KEY_PACKAGE_KIND } from "../../core/protocol.js";
 import { MockNetwork } from "../helpers/mock-network.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 
 const RELAYS = ["wss://mock-relay.test"];
 const INBOX = ["wss://mock-inbox.test"];
 
 describe("invites.listen + keyPackages.ensurePublished", () => {
-  let adminAccount: PrivateKeyAccount<any>;
-  let inviteeAccount: PrivateKeyAccount<any>;
+  let adminAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
+  let inviteeAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
   let ciphersuite: CiphersuiteImpl;
   let mockNetwork: MockNetwork;
   let adminClient: MarmotClient;

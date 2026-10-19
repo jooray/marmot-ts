@@ -103,7 +103,8 @@ export type MarmotClientOptions<
   groupStateStore: GenericKeyValueStore<SerializedClientState>;
   /**
    * Durable backend for group lifecycle intent and terminal records. When
-   * omitted, lifecycle records share {@link groupStateStore} through a
+   * omitted, lifecycle records share the `groupStateStore` from
+   * {@link MarmotClientOptions} through a
    * disband-key-scoped adapter.
    */
   lifecycleStore?: GenericKeyValueStore<Uint8Array>;

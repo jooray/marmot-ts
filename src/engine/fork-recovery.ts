@@ -57,11 +57,13 @@ import {
 } from "../core/client-state.js";
 import {
   requiredComponentIdsOf,
+  resolveCapturedCommitLegality,
   validatePreApplyProposals,
   withCapturedProposals,
 } from "./admin-policy.js";
 import type { EdgeSnapshot } from "./history-tree.js";
 import type { RetainedAppliedLink } from "./retained-store.js";
+import type { GroupHistoryTree } from "./history-tree.js";
 import type { DisbandCandidateEvidence, GroupPeeler } from "./types.js";
 import { framedEpoch } from "./wire-format.js";
 
@@ -70,6 +72,92 @@ export interface ChainLink {
   parent: ClientState;
   message: MlsMessage;
   child: ClientState;
+}
+
+/** Non-secret authenticated removal provenance; the tombstone is not a tree edge. */
+export interface RemovalAttribution {
+  version: 1 | 2;
+  /** Version 2 preserves the normal resolver's authenticated sender input. */
+  removingCommitter?: string;
+  removalDigest: string;
+  parentTag: string;
+  parentEpoch: number;
+  groupId: string;
+  localIdentity: string;
+  localLeaf: number;
+}
+
+/** Validated selection authority, independent of volatile notification withdrawal. */
+export interface RemovalRecovery {
+  removalDigest: string;
+  parentTag: string;
+  selectedTip: string;
+}
+
+/** Enumerate descendants of one exact retained active parent, never a tombstone. */
+export async function buildRemovalBranchSet(
+  tree: GroupHistoryTree,
+  attribution: RemovalAttribution,
+): Promise<BranchCandidate[] | undefined> {
+  const candidates: BranchCandidate[] = [];
+  for (const tip of tree.tips()) {
+    const path = tree.path(tip);
+    const epoch = tree.epochOf(tip);
+    const digest = tree.node(tip)?.edge?.commitDigest;
+    if (
+      !path?.includes(attribution.parentTag) ||
+      tip === attribution.parentTag ||
+      epoch === undefined ||
+      !digest
+    )
+      continue;
+    const tipCommitter = await treeTipCommitter(tree, tip);
+    if (!tipCommitter) return undefined;
+    candidates.push({
+      id: tip,
+      forkEpoch: attribution.parentEpoch,
+      tipEpoch: epoch,
+      tipDigest: digest,
+      tipCommitter,
+      appWitnesses: [],
+    });
+  }
+  return candidates;
+}
+
+/** Scoring identity from the exact authenticated tip message and its parent. */
+export function tipCommitterOf(
+  parent: ClientState,
+  message: MlsMessage,
+): Uint8Array {
+  if (message.wireformat !== wireformats.mls_public_message)
+    return new Uint8Array();
+  const sender = message.publicMessage.content.sender;
+  if (sender.senderType !== senderTypes.member) return new Uint8Array();
+  try {
+    return hexToBytes(
+      getCredentialPubkey(
+        getCredentialFromLeafIndex(
+          parent.ratchetTree,
+          sender.leafIndex as LeafIndex,
+        ),
+      ),
+    );
+  } catch {
+    return new Uint8Array();
+  }
+}
+
+/** Missing retained material cannot silently remove a competing scoring input. */
+export async function treeTipCommitter(
+  tree: GroupHistoryTree,
+  tag: string,
+): Promise<Uint8Array | undefined> {
+  const parentTag = tree.node(tag)?.parentTag;
+  if (!parentTag) return undefined;
+  const parent = await tree.stateAt(parentTag);
+  const message = await tree.commitMessageOf(tag);
+  return parent && message ? tipCommitterOf(parent, message) : undefined;
 }
 
 /**
@@ -331,7 +419,7 @@ function validateLegalityWithoutProposals(
  * instead of being replayed. That child still passes the full
  * {@link validateCommitLegality} gate when the commit's proposals can be
  * rebuilt off the wire, and every proposal-independent legality check
- * ({@link validateLegalityWithoutProposals}) when they cannot (WR-03).
+ * (internal `validateLegalityWithoutProposals`) when they cannot (WR-03).
  */
 export async function resolveCandidateParent(params: {
   ciphersuite: CiphersuiteImpl;
@@ -342,6 +430,14 @@ export async function resolveCandidateParent(params: {
 }): Promise<ParentResolution> {
   const { ciphersuite, parent, message, callback, known } = params;
   if (known?.parentTag === bytesToHex(parent.confirmationTag)) {
+    // A matching parent tag does not make a mismatched record an immediate
+    // edge. These epochs are independently decidable even when the original
+    // proposals cannot be rebuilt; reject the record before reusing its child.
+    if (
+      framedEpoch(message) !== parent.groupContext.epoch ||
+      known.state.groupContext.epoch !== parent.groupContext.epoch + 1n
+    )
+      return { kind: "authentication_mismatch" };
     // WR-03: an own commit cannot be replayed (RFC 9420: an UpdatePath never
     // encrypts a path secret to its own committer), but reusing its recorded
     // child must not skip the legality gate — the recorded state may come
@@ -418,12 +514,15 @@ export async function resolveCandidateParent(params: {
       ),
     };
   try {
-    const outcome = validateCommitLegality({
-      parentState: parent,
-      resultingState: result.newState,
-      proposals: capturedCommit.proposals,
-      committerLeafIndex: capturedCommit.committerLeafIndex,
-    });
+    const outcome = resolveCapturedCommitLegality(
+      validateCommitLegality({
+        parentState: parent,
+        resultingState: result.newState,
+        proposals: capturedCommit.proposals,
+        committerLeafIndex: capturedCommit.committerLeafIndex,
+      }),
+      capturedCommit,
+    );
     switch (outcome.kind) {
       case "legal":
         return { kind: "resolved", result };
@@ -745,29 +844,7 @@ export class ForkRecovery<TEnvelope> {
           forkEpoch,
           tipEpoch,
           tipDigest: this.#commitDigestOf(tipMessage),
-          tipCommitter: (() => {
-            const parent = chain.at(-1)?.parent;
-            if (!parent) return new Uint8Array();
-            const sender =
-              tipMessage.wireformat === wireformats.mls_public_message &&
-              tipMessage.publicMessage.content.sender.senderType ===
-                senderTypes.member
-                ? tipMessage.publicMessage.content.sender.leafIndex
-                : undefined;
-            if (sender === undefined) return new Uint8Array();
-            try {
-              return hexToBytes(
-                getCredentialPubkey(
-                  getCredentialFromLeafIndex(
-                    parent.ratchetTree,
-                    sender as LeafIndex,
-                  ),
-                ),
-              );
-            } catch {
-              return new Uint8Array();
-            }
-          })(),
+          tipCommitter: tipCommitterOf(chain.at(-1)!.parent, tipMessage),
           // Drop witnesses at/before the fork epoch or outside the retained
           // app-payload window for this candidate's tip, so stale or pre-fork
           // app payloads cannot influence branch scores.

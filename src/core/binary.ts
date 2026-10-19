@@ -123,7 +123,7 @@ export function varintSize(value: number | bigint): number {
   return 8;
 }
 
-interface OpaqueBounds {
+export interface OpaqueBounds {
   /** Minimum decoded byte length (inclusive). Defaults to `0`. */
   min?: number;
   /** Maximum decoded byte length (inclusive). Defaults to unbounded. */

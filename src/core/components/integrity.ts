@@ -178,10 +178,6 @@ export function collectAppDataUpdateOps(
  *    added, rewritten, or removed — must match one of this commit's own
  *    `AppDataUpdate` operations.
  *
- * @param args.requiredIds The current required list, used only as a fallback
- * for contexts without an app_components entry. The complete resulting list
- * controls removal, permitting an atomic authorized unrequire-and-remove.
- *
  * Additionally, per account-identity-proof-v2.md "Lifecycle, authorization, and
  * removal" ("It is not GroupContext state and MUST NOT be created, replaced, or
  * removed with `AppDataUpdate`"), this rejects any commit whose `AppDataUpdate`
@@ -195,6 +191,11 @@ export function validateAppComponentIntegrity(args: {
   currentExtensions: GroupContextExtension[];
   resultingExtensions: GroupContextExtension[];
   appDataUpdateOps: readonly AppDataUpdateOp[];
+  /**
+   * The current required list, used only as a fallback for contexts without an
+   * app_components entry. The complete resulting list controls removal,
+   * permitting an atomic authorized unrequire-and-remove.
+   */
   requiredIds: readonly AppComponentId[];
 }): CommitIntegrityViolation | undefined {
   // Read the raw dictionary generically (not the typed accessors in

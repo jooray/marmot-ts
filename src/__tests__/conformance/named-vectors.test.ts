@@ -1,9 +1,9 @@
-import committerFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/convergence-committer-selected.v1.json";
-import witnessFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/convergence-witness-selected.v1.json";
-import adminFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/admin-policy-update.v1.json";
-import groupDataFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/group-data-update.v1.json";
-import groupDataForkFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/group-data-fork-recovery.v1.json";
-import inviteForkFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/concurrent-invite-fork-recovery.v1.json";
+import committerFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/convergence-committer-selected.v1.json" with { type: "json" };
+import witnessFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/convergence-witness-selected.v1.json" with { type: "json" };
+import adminFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/admin-policy-update.v1.json" with { type: "json" };
+import groupDataFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/group-data-update.v1.json" with { type: "json" };
+import groupDataForkFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/group-data-fork-recovery.v1.json" with { type: "json" };
+import inviteForkFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/concurrent-invite-fork-recovery.v1.json" with { type: "json" };
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import {
   createCommit,
@@ -15,7 +15,6 @@ import {
   mlsMessageEncoder,
   unsafeTestingAuthenticationService,
   type ClientState,
-  type KeyPackageWithPrivateKey,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -34,7 +33,7 @@ import { MarmotConformanceSubject, parseMdkScenarioStep } from "./subject.js";
 import type { CanonicalConformanceSnapshot } from "./snapshot.js";
 import type { MarmotAuditEvent } from "../../audit/types.js";
 
-const FIXTURES = [
+const RAW_FIXTURES = [
   committerFixture,
   witnessFixture,
   adminFixture,
@@ -43,6 +42,164 @@ const FIXTURES = [
   inviteForkFixture,
 ] as const;
 const ACTORS = ["alice", "bob", "carol", "david", "eve"] as const;
+type Actor = (typeof ACTORS)[number];
+
+type ExpectedOutcome =
+  | {
+      type: "pending_resolution";
+      client: Actor;
+      step_index: number;
+      pending: string;
+      resolution: string;
+    }
+  | {
+      type: "expected_error";
+      client: Actor;
+      step_index: number;
+      operation: string;
+      error: string;
+    }
+  | {
+      type: "client_state";
+      client: Actor;
+      epoch: number;
+      member_count: number;
+      received_payloads: string[];
+    }
+  | { type: "group_profile"; client: Actor; name: string; description: string }
+  | { type: "admin_policy"; client: Actor; admins: Actor[] }
+  | ({ type: "convergence_decision"; client?: Actor } & DecisionExpectation)
+  | {
+      type: "clients_converged";
+      clients: Actor[];
+      epoch: number;
+      member_count: number;
+    };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error("Expected a fixture object");
+  return value;
+}
+
+function requireActor(value: unknown): Actor {
+  switch (value) {
+    case "alice":
+    case "bob":
+    case "carol":
+    case "david":
+    case "eve":
+      return value;
+    default:
+      throw new Error(`Unknown fixture actor: ${String(value)}`);
+  }
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Expected fixture text");
+  return value;
+}
+
+function requireCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error("Expected nonnegative fixture count");
+  return value;
+}
+
+function requireStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("Expected fixture text list");
+  return value.map(requireString);
+}
+
+function requireActors(value: unknown): Actor[] {
+  return requireStrings(value).map(requireActor);
+}
+
+function requireBoolean(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new Error("Expected fixture boolean");
+  return value;
+}
+
+function validateExpectedOutcome(value: unknown): ExpectedOutcome {
+  const outcome = requireRecord(value);
+  switch (outcome.type) {
+    case "pending_resolution":
+      return {
+        type: outcome.type,
+        client: requireActor(outcome.client),
+        step_index: requireCount(outcome.step_index),
+        pending: requireString(outcome.pending),
+        resolution: requireString(outcome.resolution),
+      };
+    case "expected_error":
+      return {
+        type: outcome.type,
+        client: requireActor(outcome.client),
+        step_index: requireCount(outcome.step_index),
+        operation: requireString(outcome.operation),
+        error: requireString(outcome.error),
+      };
+    case "client_state":
+      return {
+        type: outcome.type,
+        client: requireActor(outcome.client),
+        epoch: requireCount(outcome.epoch),
+        member_count: requireCount(outcome.member_count),
+        received_payloads: requireStrings(outcome.received_payloads),
+      };
+    case "group_profile":
+      return {
+        type: outcome.type,
+        client: requireActor(outcome.client),
+        name: requireString(outcome.name),
+        description: requireString(outcome.description),
+      };
+    case "admin_policy":
+      return {
+        type: outcome.type,
+        client: requireActor(outcome.client),
+        admins: requireActors(outcome.admins),
+      };
+    case "convergence_decision":
+      return {
+        type: outcome.type,
+        selected_tip_epoch: requireCount(outcome.selected_tip_epoch),
+        ...(outcome.client === undefined
+          ? {}
+          : { client: requireActor(outcome.client) }),
+        ...(outcome.decisive_rule === undefined
+          ? {}
+          : { decisive_rule: requireString(outcome.decisive_rule) }),
+        ...(outcome.witness_quorum_met === undefined
+          ? {}
+          : { witness_quorum_met: requireBoolean(outcome.witness_quorum_met) }),
+        ...(outcome.min_app_witness_score === undefined
+          ? {}
+          : {
+              min_app_witness_score: requireCount(
+                outcome.min_app_witness_score,
+              ),
+            }),
+      };
+    case "clients_converged":
+      return {
+        type: outcome.type,
+        clients: requireActors(outcome.clients),
+        epoch: requireCount(outcome.epoch),
+        member_count: requireCount(outcome.member_count),
+      };
+    default:
+      throw new Error(`Unsupported fixture outcome: ${String(outcome.type)}`);
+  }
+}
+
+const FIXTURES = RAW_FIXTURES.map((fixture) => ({
+  ...fixture,
+  expected_outcomes: fixture.expected_outcomes.map(validateExpectedOutcome),
+}));
 
 type Fixture = (typeof FIXTURES)[number];
 
@@ -50,17 +207,17 @@ type AuthoredCandidate = {
   publication: string;
   branchId: string;
   tipDigest: string;
-  committer: string;
+  committer: Actor;
   committerPubkey: string;
   memberPubkeys: string[];
   observedProfileName?: string;
-  invitedMember?: string;
+  invitedMember?: Actor;
   profileName?: string;
 };
 
 function candidateIdentity(
   publication: string,
-  committer: string,
+  committer: Actor,
   committerPubkey: string,
   group: MarmotGroup,
   commitMessage: NonNullable<
@@ -84,12 +241,18 @@ function candidateIdentity(
 }
 
 async function executeFixture(fixture: Fixture) {
-  const create = fixture.scenario.steps[0] as {
-    type: "create_group";
-    creator: string;
-    invitees: string[];
-    name: string;
-    initial_admins?: string[];
+  const firstStep = requireRecord(fixture.scenario.steps[0]);
+  const createAction = parseMdkScenarioStep(firstStep);
+  if (createAction.type !== "create_group")
+    throw new Error("Expected group creation first");
+  const create = {
+    creator: requireActor(createAction.creator),
+    invitees: createAction.invitees.map(requireActor),
+    name: createAction.name,
+    initial_admins:
+      firstStep.initial_admins === undefined
+        ? []
+        : requireActors(firstStep.initial_admins),
   };
   const ciphersuite = await getCiphersuiteImpl(
     "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
@@ -109,7 +272,10 @@ async function executeFixture(fixture: Fixture) {
       ),
     ),
   );
-  const packages = new Map<string, KeyPackageWithPrivateKey>(
+  const packages = new Map<
+    Actor,
+    Awaited<ReturnType<typeof generateKeyPackage>>
+  >(
     await Promise.all(
       ACTORS.map(
         async (actor) =>
@@ -151,7 +317,7 @@ async function executeFixture(fixture: Fixture) {
       add: { keyPackage: packages.get(actor)!.publicPackage },
     })),
   });
-  const states = new Map<string, ClientState>([
+  const states = new Map<Actor, ClientState>([
     [create.creator, initial.newState],
   ]);
   for (const actor of create.invitees) {
@@ -172,9 +338,9 @@ async function executeFixture(fixture: Fixture) {
   }
   const network = new MockNetwork();
   network.autoDeliver = false;
-  const groups = new Map<string, MarmotGroup>();
+  const groups = new Map<Actor, MarmotGroup>();
   const auditEvents = new Map<string, MarmotAuditEvent[]>();
-  const makeGroup = (actor: string, state: ClientState) =>
+  const makeGroup = (actor: Actor, state: ClientState) =>
     new MarmotGroup(state, {
       store: new InMemoryKeyValueStore(),
       ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
@@ -197,7 +363,7 @@ async function executeFixture(fixture: Fixture) {
     groups.set(actor, group);
   }
   const publishMetadata = async (
-    client: string,
+    client: Actor,
     metadata: Parameters<typeof proposeUpdateMetadata>[0],
   ) => {
     const group = groups.get(client)!;
@@ -247,8 +413,8 @@ async function executeFixture(fixture: Fixture) {
     executeScenarioOperation: async (step) => {
       if (step.type === "expect_update_admin_policy_error") {
         await expect(
-          publishMetadata(String(step.client), {
-            adminPubkeys: (step.admins as string[]).map((actor) =>
+          publishMetadata(requireActor(step.client), {
+            adminPubkeys: requireActors(step.admins).map((actor) =>
               identities.get(actor)!,
             ),
           }),
@@ -264,14 +430,11 @@ async function executeFixture(fixture: Fixture) {
   const expectedErrors: Array<{ client: string; error: string }> = [];
   let snapshots: Record<string, CanonicalConformanceSnapshot> = {};
 
-  for (const raw of fixture.scenario.steps as readonly Record<
-    string,
-    unknown
-  >[]) {
+  for (const raw of fixture.scenario.steps.map(requireRecord)) {
     if (raw.type === "invite_members") {
       const before = network.queuedEvents.length;
-      const inviter = String(raw.inviter);
-      const invitees = raw.invitees as string[];
+      const inviter = requireActor(raw.inviter);
+      const invitees = requireActors(raw.invitees);
       const group = groups.get(inviter)!;
       const results = await group.submitIntent({
         kind: "commit",
@@ -305,9 +468,7 @@ async function executeFixture(fixture: Fixture) {
               cipherSuite: ciphersuite,
               authService: unsafeTestingAuthenticationService,
             },
-            welcome:
-              (welcome.welcome as { welcome?: never }).welcome ??
-              welcome.welcome,
+            welcome: welcome.welcome.welcome,
             keyPackage: kp.publicPackage,
             privateKeys: kp.privatePackage,
             ratchetTree: undefined,
@@ -319,9 +480,7 @@ async function executeFixture(fixture: Fixture) {
     }
     if (raw.type === "withhold_message") {
       const label = String(raw.label);
-      const publication = String(
-        (raw.selector as Record<string, unknown>).publication,
-      );
+      const publication = String(requireRecord(raw.selector).publication);
       const event = publications.get(publication)!;
       const index = network.queuedEvents.indexOf(event);
       expect(index).toBeGreaterThanOrEqual(0);
@@ -342,7 +501,7 @@ async function executeFixture(fixture: Fixture) {
     }
     if (raw.type === "update_group_data") {
       const publication = String(raw.pending);
-      const candidate = await publishMetadata(String(raw.client), {
+      const candidate = await publishMetadata(requireActor(raw.client), {
         name: String(raw.name),
       });
       authoredCandidates.set(publication, {
@@ -354,8 +513,8 @@ async function executeFixture(fixture: Fixture) {
     }
     if (raw.type === "update_admin_policy") {
       const publication = String(raw.pending);
-      const candidate = await publishMetadata(String(raw.client), {
-        adminPubkeys: (raw.admins as string[]).map((actor) =>
+      const candidate = await publishMetadata(requireActor(raw.client), {
+        adminPubkeys: requireActors(raw.admins).map((actor) =>
           identities.get(actor)!,
         ),
       });
@@ -446,7 +605,7 @@ function convergenceDecision(
   candidates: Map<string, AuthoredCandidate>,
 ) {
   const branchIds = new Set([...candidates.values()].map((c) => c.branchId));
-  return clients
+  const decisions = clients
     .flatMap((client) => auditEvents.get(client) ?? [])
     .map((event) => event.kind)
     .filter(
@@ -456,14 +615,18 @@ function convergenceDecision(
         MarmotAuditEvent["kind"],
         { type: "convergence_decision" }
       > => kind.type === "convergence_decision",
-    )
-    .findLast(
-      (decision) =>
-        decision.selected_branch_id !== undefined &&
-        decision.selected_tip_digest !== undefined &&
-        decision.selected_tip_committer !== undefined &&
-        branchIds.has(decision.selected_branch_id),
     );
+  for (let index = decisions.length - 1; index >= 0; index--) {
+    const decision = decisions[index]!;
+    if (
+      decision.selected_branch_id !== undefined &&
+      decision.selected_tip_digest !== undefined &&
+      decision.selected_tip_committer !== undefined &&
+      branchIds.has(decision.selected_branch_id)
+    )
+      return decision;
+  }
+  return undefined;
 }
 
 describe("named MDK scenarios against real Marmot actors", () => {
@@ -480,9 +643,11 @@ describe("named MDK scenarios against real Marmot actors", () => {
         authoredCandidates,
       } = await executeFixture(fixture);
       const observedClients = new Set(
-        fixture.expected_outcomes
-          .filter((outcome) => "client" in outcome)
-          .map((outcome) => (outcome as { client: string }).client),
+        fixture.expected_outcomes.flatMap((outcome) =>
+          "client" in outcome && outcome.client !== undefined
+            ? [outcome.client]
+            : [],
+        ),
       );
       for (const client of observedClients)
         snapshots[client] ??= await subject.snapshot(client);
@@ -526,7 +691,9 @@ describe("named MDK scenarios against real Marmot actors", () => {
           );
         if (expected.type === "convergence_decision") {
           const clients =
-            "client" in expected ? [expected.client] : [...groups.keys()];
+            expected.client !== undefined
+              ? [expected.client]
+              : [...groups.keys()];
           const expectedWinner = fixtureExpectedWinner(
             fixture,
             authoredCandidates,
@@ -598,14 +765,14 @@ describe("named MDK scenarios against real Marmot actors", () => {
   );
 
   it("rejects a swapped production outcome through the fixture oracle", async () => {
-    const result = await executeFixture(committerFixture);
-    const expected = committerFixture.expected_outcomes.find(
+    const fixture = FIXTURES[0]!;
+    const result = await executeFixture(fixture);
+    const expected = fixture.expected_outcomes.find(
       (outcome) => outcome.type === "convergence_decision",
-    )!;
-    const winner = fixtureExpectedWinner(
-      committerFixture,
-      result.authoredCandidates,
     );
+    if (!expected || expected.client === undefined)
+      throw new Error("Expected a client convergence decision");
+    const winner = fixtureExpectedWinner(fixture, result.authoredCandidates);
     const loser = [...result.authoredCandidates.values()].find(
       (candidate) => candidate.branchId !== winner.branchId,
     )!;

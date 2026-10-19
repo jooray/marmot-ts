@@ -1,12 +1,6 @@
-import { bytesToHex } from "@noble/hashes/utils.js";
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import { Rumor, unlockGiftWrap } from "applesauce-common/helpers/gift-wrap";
-import { getEventHash, type NostrEvent } from "applesauce-core/helpers/event";
-import {
-  CiphersuiteImpl,
-  defaultCryptoProvider,
-  getCiphersuiteImpl,
-} from "ts-mls";
+import { getEventHash } from "applesauce-core/helpers/event";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApplicationMessageIntent } from "../../client/group/application-message.js";
 import { MarmotClient } from "../../client/marmot-client.js";
@@ -23,7 +17,7 @@ import {
 import type { StoredKeyPackage } from "../../client/key-package-manager.js";
 import { unixNow } from "../../utils/nostr.js";
 import { MockNetwork } from "../helpers/mock-network.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 
 // NOTE: we use the shared test helper MockNetwork, not an inline version.
 
@@ -34,7 +28,6 @@ import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
 describe("End-to-end: invite, join, first message", () => {
   let adminAccount: PrivateKeyAccount<any>;
   let inviteeAccount: PrivateKeyAccount<any>;
-  let ciphersuite: CiphersuiteImpl;
   let mockNetwork: MockNetwork;
   let adminClient: MarmotClient;
   let inviteeClient: MarmotClient;
@@ -43,12 +36,6 @@ describe("End-to-end: invite, join, first message", () => {
     // Create real accounts
     adminAccount = PrivateKeyAccount.generateNew();
     inviteeAccount = PrivateKeyAccount.generateNew();
-
-    // Initialize ciphersuite
-    ciphersuite = await getCiphersuiteImpl(
-      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-      defaultCryptoProvider,
-    );
 
     // Create mock network
     mockNetwork = new MockNetwork();
@@ -81,7 +68,10 @@ describe("End-to-end: invite, join, first message", () => {
     // Retrieve the published event so we can verify the event ID later
     const signedKeyPackageEvent = mockNetwork.events.find(
       (e) => e.kind === ADDRESSABLE_KEY_PACKAGE_KIND,
-    ) as NostrEvent;
+    );
+    expect(signedKeyPackageEvent).toBeDefined();
+    if (!signedKeyPackageEvent)
+      throw new Error("expected published KeyPackage");
 
     // Step 2: Admin creates group
     const adminGroup = await adminClient.groups.create("Test Group", {

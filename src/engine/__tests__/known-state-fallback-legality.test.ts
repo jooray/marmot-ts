@@ -13,10 +13,14 @@ import {
   appDataDictionaryExtensionType,
   bytesToBase64,
   createCommit,
+  createProposal,
+  contentTypes,
   defaultProposalTypes,
   getAppDataDictionary,
   makeAppDataDictionaryExtension,
   processMessage,
+  proposalOrRefTypes,
+  wireformats,
   type ClientState,
   type Proposal,
 } from "ts-mls";
@@ -28,6 +32,11 @@ import {
 } from "../../__tests__/helpers/engine-seam-fixtures.js";
 import { getMarmotGroupView } from "../../core/client-state.js";
 import { getPubkeyLeafNodeIndexes } from "../../core/group-members.js";
+import {
+  dropAccountIdentityProofRequirement,
+  forgeKeyPackage,
+} from "../../__tests__/helpers/account-identity-proof-fixtures.js";
+import { testAccount } from "../../__tests__/helpers/test-accounts.js";
 import { createAdminCommitPolicyCallback } from "../admin-policy.js";
 import { resolveCandidateParent } from "../fork-recovery.js";
 import { encodeGroupBlossomImage } from "../../core/components/blossom-image.js";
@@ -307,6 +316,217 @@ describe("known image child recovery", () => {
   it("keeps valid private stamped image children viable without actor attribution", async () => {
     expect((await resolve({ data: present, privateMessage: true })).kind).toBe(
       "resolved",
+    );
+  });
+});
+
+describe("D-09-08 exact known-child acceptance matrix", () => {
+  let f: Awaited<ReturnType<typeof seamGroup>>;
+  beforeAll(async () => {
+    f = await seamGroup();
+  });
+
+  function resolve(
+    message: Awaited<ReturnType<typeof createCommit>>["commit"],
+    child: ClientState,
+    parent = snapshot(f.admin2Epoch1),
+    parentTag = bytesToHex(f.admin2Epoch1.confirmationTag),
+  ) {
+    return resolveCandidateParent({
+      ciphersuite: f.impl,
+      parent,
+      message,
+      callback: createAdminCommitPolicyCallback({
+        ratchetTree: parent.ratchetTree,
+        adminPubkeys: getMarmotGroupView(parent)!.adminPubkeys,
+        ciphersuiteId: f.impl.id,
+      }),
+      known: { parentTag, state: child },
+    });
+  }
+
+  async function commit(
+    extraProposals: Proposal[] = [],
+    publicMessage = false,
+  ) {
+    return createCommit({
+      context: f.ctx,
+      state: snapshot(f.admin2Epoch1),
+      wireAsPublicMessage: publicMessage,
+      extraProposals,
+    });
+  }
+
+  it("accepts a public own child with a genuinely missing proposal reference", async () => {
+    const proposal = await createProposal({
+      context: f.ctx,
+      state: snapshot(f.admin2Epoch1),
+      wireAsPublicMessage: true,
+      proposal: imageUpdate(encodeGroupBlossomImage({ kind: "empty" })),
+    });
+    const own = await createCommit({
+      context: f.ctx,
+      state: proposal.newState,
+      wireAsPublicMessage: true,
+    });
+    if (own.commit.wireformat !== wireformats.mls_public_message)
+      throw new Error("expected public commit");
+    expect(own.commit.publicMessage.content.contentType).toBe(
+      contentTypes.commit,
+    );
+    if (own.commit.publicMessage.content.contentType !== contentTypes.commit)
+      throw new Error("expected commit content");
+    expect(
+      own.commit.publicMessage.content.commit.proposals.some(
+        (entry) => entry.proposalOrRefType === proposalOrRefTypes.reference,
+      ),
+    ).toBe(true);
+    expect(Object.keys(f.admin2Epoch1.unappliedProposals)).toHaveLength(0);
+    const resolution = await resolve(own.commit, own.newState);
+    expect(resolution.kind).toBe("resolved");
+    if (resolution.kind === "resolved")
+      expect(bytesToHex(resolution.result.newState.confirmationTag)).toBe(
+        bytesToHex(own.newState.confirmationTag),
+      );
+  });
+
+  it("accepts a private own child whose encrypted proposals cannot be rebuilt", async () => {
+    const own = await commit([
+      imageUpdate(encodeGroupBlossomImage({ kind: "empty" })),
+    ]);
+    expect(own.commit.wireformat).toBe(wireformats.mls_private_message);
+    const resolution = await resolve(own.commit, own.newState);
+    expect(resolution.kind).toBe("resolved");
+    if (resolution.kind === "resolved")
+      expect(bytesToHex(resolution.result.newState.confirmationTag)).toBe(
+        bytesToHex(own.newState.confirmationTag),
+      );
+  });
+
+  it("rejects a malformed identity proof in a genuine private Add child", async () => {
+    const forged = await forgeKeyPackage({
+      account: testAccount(9),
+      ciphersuiteImpl: f.impl,
+      proof: "tampered",
+    });
+    const own = await commit([
+      {
+        proposalType: defaultProposalTypes.add,
+        add: { keyPackage: forged.publicPackage },
+      },
+    ]);
+    expect(await resolve(own.commit, own.newState)).toMatchObject({
+      kind: "rejected",
+      violation: { reason: "account-identity-proof" },
+    });
+  });
+
+  it("rejects a profile mismatch reached by an authenticated private commit", async () => {
+    const own = await commit([
+      dropAccountIdentityProofRequirement(f.admin2Epoch1),
+    ]);
+    expect(await resolve(own.commit, own.newState)).toMatchObject({
+      kind: "rejected",
+      violation: { reason: "account-identity-proof" },
+    });
+  });
+
+  it("rejects a protected-extension mismatch reached by an authenticated private commit", async () => {
+    const own = await commit([
+      {
+        proposalType: appDataUpdateProposalType,
+        appDataUpdate: {
+          componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
+          operation: "remove",
+        },
+      },
+    ]);
+    expect(await resolve(own.commit, own.newState)).toMatchObject({
+      kind: "rejected",
+      violation: { reason: "component-integrity" },
+    });
+  });
+
+  it("rejects invalid admin-leaf coupling in a genuine private Remove child", async () => {
+    const [removed] = getPubkeyLeafNodeIndexes(f.admin2Epoch1, f.adminPubkey);
+    if (removed === undefined) throw new Error("expected admin leaf");
+    const own = await commit([
+      { proposalType: defaultProposalTypes.remove, remove: { removed } },
+    ]);
+    expect(await resolve(own.commit, own.newState)).toMatchObject({
+      kind: "rejected",
+      violation: { reason: "admin-leaf-coupling" },
+    });
+  });
+
+  it("rejects a wrong recorded exact parent instead of bypassing own-commit authentication", async () => {
+    const own = await commit();
+    const other = await commit();
+    const resolution = await resolve(
+      own.commit,
+      own.newState,
+      snapshot(f.admin2Epoch1),
+      bytesToHex(other.newState.confirmationTag),
+    );
+    expect(resolution.kind).toBe("authentication_mismatch");
+  });
+
+  it("cannot splice an own child onto a competing same-epoch branch", async () => {
+    const a = await commit();
+    const b = await commit();
+    expect(a.newState.groupContext.epoch).toBe(b.newState.groupContext.epoch);
+    expect(bytesToHex(a.newState.confirmationTag)).not.toBe(
+      bytesToHex(b.newState.confirmationTag),
+    );
+    const own = await createCommit({
+      context: f.ctx,
+      state: snapshot(a.newState),
+      wireAsPublicMessage: false,
+    });
+    const resolution = await resolve(
+      own.commit,
+      own.newState,
+      snapshot(b.newState),
+      bytesToHex(a.newState.confirmationTag),
+    );
+    expect(resolution.kind).toBe("authentication_mismatch");
+    // Positive exact-parent control on the same message and child.
+    expect(
+      (
+        await resolve(
+          own.commit,
+          own.newState,
+          snapshot(a.newState),
+          bytesToHex(a.newState.confirmationTag),
+        )
+      ).kind,
+    ).toBe("resolved");
+  });
+
+  it("rejects a genuine grandchild supplied as the exact parent's immediate child", async () => {
+    const own = await commit();
+    const grandchild = await createCommit({
+      context: f.ctx,
+      state: snapshot(own.newState),
+      wireAsPublicMessage: false,
+    });
+    expect(grandchild.newState.groupContext.epoch).toBe(
+      f.admin2Epoch1.groupContext.epoch + 2n,
+    );
+    expect((await resolve(own.commit, grandchild.newState)).kind).toBe(
+      "authentication_mismatch",
+    );
+  });
+
+  it("rejects a genuine next-epoch commit paired with an earlier stamped parent", async () => {
+    const own = await commit();
+    const next = await createCommit({
+      context: f.ctx,
+      state: snapshot(own.newState),
+      wireAsPublicMessage: false,
+    });
+    expect((await resolve(next.commit, own.newState)).kind).toBe(
+      "authentication_mismatch",
     );
   });
 });

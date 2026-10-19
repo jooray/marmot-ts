@@ -6,10 +6,14 @@ import {
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import { describe, expect, it, vi } from "vitest";
 
-import { BoundedIdCache, GroupsManager } from "../client/groups-manager.js";
+import {
+  BoundedIdCache,
+  GroupsManager,
+  type GroupsManagerOptions,
+} from "../client/groups-manager.js";
 import { MarmotGroup } from "../client/group/marmot-group.js";
 import type { NostrNetworkInterface } from "../client/nostr-interface.js";
-import { fakeVerifyEvent } from "../client/verify.js";
+import { fakeVerifyEvent, type VerifyEventMethod } from "../client/verify.js";
 import type { SerializedClientState } from "../core/client-state.js";
 import { InMemoryKeyValueStore } from "../extra/in-memory-key-value-store.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
@@ -45,6 +49,21 @@ import {
 // creator's account identity proof.
 const ADMIN_ACCOUNT = testAccount(0);
 const ADMIN = ADMIN_ACCOUNT.pubkey;
+
+/** Independent fallback byte stores for fixtures that omitted ingest persistence. */
+function ephemeralManagerStores(): Pick<
+  GroupsManagerOptions,
+  "ingestStateStore" | "lifecycleStore" | "ingestPersistence"
+> {
+  return {
+    ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+    lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+    ingestPersistence: {
+      kind: "ephemeral",
+      reason: "ingest_state_store_omitted",
+    },
+  };
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -205,11 +224,12 @@ describe("group image mutation queue", () => {
       expect(
         () =>
           new GroupsManager({
+            ...ephemeralManagerStores(),
             store: new EmptyGroupStateStore(),
             signer: ADMIN_ACCOUNT.signer,
             network: new MockNetwork(),
             maxPendingImageMutations: capacity,
-          } as never),
+          }),
       ).toThrow(/positive|integer|finite/i);
     },
   );
@@ -714,8 +734,8 @@ describe("deferred group image authority", () => {
     await vi.waitFor(() => expect(upload.transport).toHaveBeenCalledOnce());
     vi.spyOn(group, "profileSupport", "get").mockReturnValue({
       kind: "unsupported",
-      proofReason: "missing-required-proof",
-    } as never);
+      proofReason: "missing-requirement",
+    });
     upload.gate.resolve();
     await operation;
     expect(submit.mock.calls.length).toBe(0);
@@ -815,9 +835,10 @@ class EmptyGroupStateStore implements GenericKeyValueStore<SerializedClientState
 describe("GroupsManager", () => {
   function watchManager() {
     return new GroupsManager({
+      ...ephemeralManagerStores(),
       store: new EmptyGroupStateStore(),
-      signer: {} as never,
-      network: {} as NostrNetworkInterface,
+      signer: ADMIN_ACCOUNT.signer,
+      network: new MockNetwork(),
     });
   }
 
@@ -928,9 +949,10 @@ describe("GroupsManager", () => {
 
   it("watch emits a new array instance for every update", async () => {
     const manager = new GroupsManager({
+      ...ephemeralManagerStores(),
       store: new EmptyGroupStateStore(),
-      signer: {} as never,
-      network: {} as NostrNetworkInterface,
+      signer: ADMIN_ACCOUNT.signer,
+      network: new MockNetwork(),
     });
 
     const watcher = manager.watch();
@@ -956,6 +978,7 @@ describe("GroupsManager session/runtime helpers", () => {
     const stateStore = new InMemoryKeyValueStore<SerializedClientState>();
     const lifecycleStore = new InMemoryKeyValueStore<Uint8Array>();
     const manager = new GroupsManager({
+      ...ephemeralManagerStores(),
       store: stateStore,
       lifecycleStore,
       signer: ADMIN_ACCOUNT.signer,
@@ -1006,6 +1029,7 @@ describe("GroupsManager session/runtime helpers", () => {
     const stateStore = shared as GenericKeyValueStore<SerializedClientState>;
     const markerStore = shared as GenericKeyValueStore<boolean>;
     const manager = new GroupsManager({
+      ...ephemeralManagerStores(),
       store: stateStore,
       removedMarkerStore: markerStore,
       signer: ADMIN_ACCOUNT.signer,
@@ -1032,6 +1056,7 @@ describe("GroupsManager session/runtime helpers", () => {
   function makeManager(network: NostrNetworkInterface) {
     const signer = ADMIN_ACCOUNT.signer;
     return new GroupsManager({
+      ...ephemeralManagerStores(),
       store: new InMemoryKeyValueStore<SerializedClientState>(),
       signer,
       network,
@@ -1112,6 +1137,7 @@ describe("GroupsManager session/runtime helpers", () => {
     const removedMarkerStore = new InMemoryKeyValueStore<boolean>();
     const signer = ADMIN_ACCOUNT.signer;
     const options = {
+      ...ephemeralManagerStores(),
       store: stateStore,
       removedMarkerStore,
       signer,
@@ -1163,7 +1189,12 @@ describe("GroupsManager session/runtime helpers", () => {
     const network = new MockNetwork(["wss://relay.test"]);
     const stateStore = new InMemoryKeyValueStore<SerializedClientState>();
     const signer = ADMIN_ACCOUNT.signer;
-    const writer = new GroupsManager({ store: stateStore, signer, network });
+    const writer = new GroupsManager({
+      ...ephemeralManagerStores(),
+      store: stateStore,
+      signer,
+      network,
+    });
     const created = await writer.create("Activation Retry", {
       relays: ["wss://relay.test"],
     });
@@ -1178,7 +1209,12 @@ describe("GroupsManager session/runtime helpers", () => {
       .mockRejectedValueOnce(activationError)
       .mockResolvedValue(undefined);
     const dispose = vi.spyOn(MarmotGroup.prototype, "dispose");
-    const reader = new GroupsManager({ store: stateStore, signer, network });
+    const reader = new GroupsManager({
+      ...ephemeralManagerStores(),
+      store: stateStore,
+      signer,
+      network,
+    });
 
     const firstAttempt = [reader.get(created.id), reader.get(created.id)];
     await expect(firstAttempt[0]).rejects.toBe(activationError);
@@ -1203,7 +1239,12 @@ describe("GroupsManager session/runtime helpers", () => {
       .mockRejectedValueOnce(markerError)
       .mockResolvedValueOnce(null);
     const signer = ADMIN_ACCOUNT.signer;
-    const writer = new GroupsManager({ store: stateStore, signer, network });
+    const writer = new GroupsManager({
+      ...ephemeralManagerStores(),
+      store: stateStore,
+      signer,
+      network,
+    });
     const created = await writer.create("Marker Retry", {
       relays: ["wss://relay.test"],
     });
@@ -1215,6 +1256,7 @@ describe("GroupsManager session/runtime helpers", () => {
 
     const dispose = vi.spyOn(MarmotGroup.prototype, "dispose");
     const reader = new GroupsManager({
+      ...ephemeralManagerStores(),
       store: stateStore,
       removedMarkerStore,
       signer,
@@ -1239,7 +1281,12 @@ describe("GroupsManager session/runtime helpers", () => {
       const network = new MockNetwork(["wss://relay.test"]);
       const stateStore = new InMemoryKeyValueStore<SerializedClientState>();
       const signer = ADMIN_ACCOUNT.signer;
-      const writer = new GroupsManager({ store: stateStore, signer, network });
+      const writer = new GroupsManager({
+        ...ephemeralManagerStores(),
+        store: stateStore,
+        signer,
+        network,
+      });
       const created = await writer.create("Late Activation", {
         relays: ["wss://relay.test"],
       });
@@ -1267,7 +1314,12 @@ describe("GroupsManager session/runtime helpers", () => {
         })
         .mockResolvedValue(undefined);
       const dispose = vi.spyOn(MarmotGroup.prototype, "dispose");
-      const reader = new GroupsManager({ store: stateStore, signer, network });
+      const reader = new GroupsManager({
+        ...ephemeralManagerStores(),
+        store: stateStore,
+        signer,
+        network,
+      });
       const updated = vi.fn();
       const loaded = vi.fn();
       reader.on("updated", updated);
@@ -1347,14 +1399,15 @@ describe("GroupsManager #connectGroup drain — trust boundary (SEC-01/WIRE-02)"
 
   function makeManager(
     network: NostrNetworkInterface,
-    verifyEvent?: (event: NostrEvent) => boolean,
+    verifyEvent?: VerifyEventMethod,
   ) {
     const signer = ADMIN_ACCOUNT.signer;
     return new GroupsManager({
+      ...ephemeralManagerStores(),
       store: new InMemoryKeyValueStore<SerializedClientState>(),
       signer,
       network,
-      verifyEvent: verifyEvent as any,
+      verifyEvent,
     });
   }
 
@@ -1488,6 +1541,8 @@ describe("GroupsManager #connectGroup drain — trust boundary (SEC-01/WIRE-02)"
     );
     const unfilteredNetwork: NostrNetworkInterface = {
       ...network,
+      publish: network.publish.bind(network),
+      getUserInboxRelays: network.getUserInboxRelays.bind(network),
       request: async () => [wrongGroup],
       subscription: () => ({
         subscribe: () => ({ unsubscribe: () => {} }),

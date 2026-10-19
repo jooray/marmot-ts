@@ -9,7 +9,30 @@ import {
 import { getPublicKey, generateSecretKey } from "applesauce-core/helpers/keys";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { createGroupImageUploadAuthorization } from "../group-image-transport.js";
-import { makeAppDataDictionaryExtension, type ClientState } from "ts-mls";
+import {
+  appDataUpdateProposalType,
+  createCommit,
+  defaultCryptoProvider,
+  getCiphersuiteImpl,
+  makeAppDataDictionaryExtension,
+  type ClientState,
+} from "ts-mls";
+import {
+  MarmotGroup,
+  type BaseGroupHistory,
+  type BaseGroupMedia,
+  type StoredMedia,
+} from "../marmot-group.js";
+import { MockNetwork } from "../../../__tests__/helpers/mock-network.js";
+import { testAccount } from "../../../__tests__/helpers/test-accounts.js";
+import { createCredential } from "../../../core/credential.js";
+import { marmotAuthService } from "../../../core/auth-service.js";
+import { createSimpleGroup } from "../../../core/group.js";
+import { generateKeyPackage } from "../../../core/key-package.js";
+import { InMemoryKeyValueStore } from "../../../extra/in-memory-key-value-store.js";
+import { deserializeClientState } from "../../../core/client-state.js";
+import { DEFAULT_CONVERGENCE_POLICY } from "../../../core/convergence.js";
+import { GroupHistoryTree } from "../../../engine/history-tree.js";
 import {
   encodeGroupBlossomImage,
   type GroupBlossomImagePresent,
@@ -55,7 +78,11 @@ function fixture() {
   return { image, source, service, getState };
 }
 function canonicalFixture(
-  cache: { maxCacheEntries?: number; maxCacheBytes?: number } = {},
+  cache: {
+    maxCacheEntries?: number;
+    maxCacheBytes?: number;
+    getRetainedStates?: () => Iterable<ClientState>;
+  } = {},
 ) {
   const image = encryptGroupImage(Uint8Array.of(1, 2, 3), "image/png");
   let state: ClientState;
@@ -92,6 +119,516 @@ function canonicalFixture(
     },
   };
 }
+
+async function retentionFixture(
+  horizon = 1,
+  adapters: { history?: BaseGroupHistory; media?: BaseGroupMedia } = {},
+) {
+  const account = testAccount(6);
+  const ciphersuite = await getCiphersuiteImpl(
+    "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+    defaultCryptoProvider,
+  );
+  const kp = await generateKeyPackage({
+    credential: createCredential(account.pubkey),
+    signer: account.signer,
+    ciphersuiteImpl: ciphersuite,
+  });
+  const { clientState } = await createSimpleGroup(kp, ciphersuite, "Images", {
+    adminPubkeys: [account.pubkey],
+    relays: ["wss://relay.test"],
+  });
+  const store = new InMemoryKeyValueStore<Uint8Array>();
+  const rewindStore = new InMemoryKeyValueStore<Uint8Array>();
+  const options = {
+    store,
+    rewindStore,
+    ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+    signer: account.signer,
+    ciphersuite,
+    network: new MockNetwork(["wss://relay.test"]),
+    convergencePolicy: {
+      ...DEFAULT_CONVERGENCE_POLICY,
+      maxRewindCommits: horizon,
+      appPayloadPastEpochLimit: horizon,
+    },
+    scheduler: { setTimer: () => 1, clearTimer() {} },
+    ...adapters,
+  };
+  const group = new MarmotGroup(clientState, options);
+  const setImage = async (metadata: GroupBlossomImagePresent | null) => {
+    const effects = await group.session.send({
+      kind: "commit",
+      actorPubkey: account.pubkey,
+      expectedParent: group.session.parentToken,
+      extraProposals: [
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: 0x8002,
+            operation: "update",
+            update: encodeGroupBlossomImage(metadata ?? { kind: "empty" }),
+          },
+        },
+      ],
+    });
+    const work = effects.publish[0]!;
+    if (work.kind !== "groupEvolution")
+      throw new Error("expected metadata commit");
+    group.session.confirmPublished(work.pending);
+  };
+  const advance = async () => {
+    const effects = await group.session.send({ kind: "selfUpdate" });
+    const work = effects.publish[0]!;
+    if (work.kind !== "selfUpdate") throw new Error("expected self update");
+    group.session.confirmPublished(work.pending);
+  };
+  return { group, options, store, rewindStore, setImage, advance };
+}
+
+function imageCache(service: GroupImageService) {
+  return service as unknown as {
+    cache: Map<string, { bytes: Uint8Array }>;
+    cacheBytes: number;
+    plaintext: Set<Uint8Array>;
+  };
+}
+
+describe("settled image retention", () => {
+  it("leaves custom media rows and returned plaintext application-owned through epoch pruning and restart", async () => {
+    const rows = new Map<string, StoredMedia>();
+    const media: BaseGroupMedia = {
+      addMedia: vi.fn(async (hash, entry) => {
+        rows.set(hash, entry);
+      }),
+      getMedia: vi.fn(async (hash) => rows.get(hash) ?? null),
+      removeMedia: vi.fn(async (hash) => {
+        rows.delete(hash);
+      }),
+      listMedia: vi.fn(async () =>
+        [...rows.values()].map((entry) => entry.attachment),
+      ),
+      clearMedia: vi.fn(async () => {
+        rows.clear();
+      }),
+    };
+    const { group, options, store, rewindStore, advance } =
+      await retentionFixture(1, { media });
+    const original = Uint8Array.of(255, 0, 128, 195, 40, 240, 159, 152, 128);
+    const encrypted = await group.encryptMedia(new Blob([original]), {
+      filename: "é-e\u0301.bin",
+      type: "application/octet-stream",
+    });
+    const delivered = await group.decryptMedia(
+      encrypted.encrypted,
+      encrypted.attachment,
+    );
+    const hash = encrypted.attachment.ciphertextSha256;
+    expect(rows.get(hash)!.data).toBe(delivered.data);
+    expect(delivered.data).toEqual(original);
+    const opaque = Uint8Array.of(0, 255, 128);
+    await media.addMedia("application-row-without-epoch", {
+      data: opaque,
+      attachment: { ...encrypted.attachment, filename: "opaque.bin" },
+    });
+    for (let epoch = 0; epoch < 8; epoch++) {
+      await advance();
+      await group.save(true);
+    }
+    expect(group.session.historyTree.size).toBe(2);
+    expect(media.removeMedia).not.toHaveBeenCalled();
+    expect(media.clearMedia).not.toHaveBeenCalled();
+    expect(rows.size).toBe(2);
+    expect(rows.get(hash)!.data).toBe(delivered.data);
+    expect(delivered.data).toEqual(original);
+    expect(rows.get("application-row-without-epoch")!.data).toBe(opaque);
+    expect(opaque).toEqual(Uint8Array.of(0, 255, 128));
+    const id = bytesToHex(group.id);
+    group.dispose();
+    const restarted = new MarmotGroup(
+      deserializeClientState((await store.getItem(id))!),
+      {
+        ...options,
+        historyTree: (await GroupHistoryTree.load(rewindStore, id))!,
+      },
+    );
+    const restored = await restarted.decryptMedia(
+      encrypted.encrypted,
+      encrypted.attachment,
+    );
+    expect(restored.data).toBe(delivered.data);
+    await restarted.save(true);
+    restarted.dispose();
+    expect(delivered.data).toEqual(original);
+    expect(opaque).toEqual(Uint8Array.of(0, 255, 128));
+    expect(media.removeMedia).not.toHaveBeenCalled();
+    expect(media.clearMedia).not.toHaveBeenCalled();
+  });
+
+  it("preserves exact caller image arrays across replacement, clear, rewind, retirement, restart and close", async () => {
+    const { group, options, store, rewindStore, setImage, advance } =
+      await retentionFixture();
+    const expectedFirst = Uint8Array.of(0, 255, 128, 195, 40);
+    const expectedSecond = Uint8Array.of(240, 159, 152, 128, 0);
+    const first = encryptGroupImage(expectedFirst, "image/png");
+    const second = encryptGroupImage(expectedSecond, "image/jpeg");
+    let body = first.ciphertext;
+    const profile = {
+      endpoints: [endpoint],
+      transport: async () => ({ status: 200, body }),
+    };
+    await setImage(first.metadata);
+    const initial = await group.image.read(profile);
+    if (initial.kind !== "available") throw new Error("expected first image");
+    const owned = imageCache(group.image).cache.get(
+      initial.snapshotIdentity,
+    )!.bytes;
+    expect(owned).not.toBe(initial.bytes);
+    expect(imageCache(group.image).plaintext.has(initial.bytes)).toBe(false);
+    await setImage(second.metadata);
+    body = second.ciphertext;
+    const replacement = await group.image.read(profile);
+    if (replacement.kind !== "available")
+      throw new Error("expected replacement image");
+    expect(imageCache(group.image).plaintext.has(replacement.bytes)).toBe(
+      false,
+    );
+    expect(initial.bytes).toEqual(expectedFirst);
+    await setImage(null);
+    expect(group.image.source()).toEqual({ kind: "none" });
+    await group.save(true);
+    expect(owned).toEqual(new Uint8Array(expectedFirst.length));
+    expect(initial.bytes).toEqual(expectedFirst);
+    expect(replacement.bytes).toEqual(expectedSecond);
+    // Restore the authenticated epoch-2 snapshot through the existing mutable
+    // facade; no synthetic image-source projection is substituted.
+    const oldTag = group.forkTree
+      .tags()
+      .find((tag) => group.forkTree.epochOf(tag) === 2)!;
+    group.state = (await group.forkTree.stateAt(oldTag))!;
+    expect(await group.image.read(profile)).toMatchObject({
+      kind: "available",
+      bytes: expectedSecond,
+    });
+    await advance();
+    await group.save(true);
+    const id = bytesToHex(group.id);
+    group.dispose();
+    const restarted = new MarmotGroup(
+      deserializeClientState((await store.getItem(id))!),
+      {
+        ...options,
+        historyTree: (await GroupHistoryTree.load(rewindStore, id))!,
+      },
+    );
+    const afterRestart = await restarted.image.read(profile);
+    expect(afterRestart).toMatchObject({
+      kind: "available",
+      bytes: expectedSecond,
+    });
+    restarted.dispose();
+    expect(initial.bytes).toEqual(expectedFirst);
+    expect(replacement.bytes).toEqual(expectedSecond);
+    if (afterRestart.kind === "available")
+      expect(afterRestart.bytes).toEqual(expectedSecond);
+  });
+
+  it("leaves owned cache bytes intact when required session persistence rejects", async () => {
+    const { group, store, setImage, advance } = await retentionFixture();
+    const image = encryptGroupImage(Uint8Array.of(0, 128, 255), "image/png");
+    await setImage(image.metadata);
+    expect(
+      (
+        await group.image.read({
+          endpoints: [endpoint],
+          transport: async () => ({ status: 200, body: image.ciphertext }),
+        })
+      ).kind,
+    ).toBe("available");
+    const identity = getGroupImageSnapshotIdentity(image.metadata);
+    const owned = imageCache(group.image).cache.get(identity)!.bytes;
+    await setImage(null);
+    await advance();
+    const write = vi
+      .spyOn(store, "setItem")
+      .mockRejectedValueOnce(new Error("required save failed"));
+    await expect(group.save(true)).rejects.toThrow("required save failed");
+    expect(imageCache(group.image).cache.get(identity)!.bytes).toBe(owned);
+    expect(owned).toEqual(Uint8Array.of(0, 128, 255));
+    write.mockRestore();
+    await group.save(true);
+    expect(owned).toEqual(new Uint8Array(3));
+    group.dispose();
+  });
+  it("retires obsolete owned image bytes only after a successful facade save", async () => {
+    const { group, setImage, advance } = await retentionFixture();
+    const old = encryptGroupImage(Uint8Array.of(0, 255, 128, 1), "image/png");
+    await setImage(old.metadata);
+    const profile = {
+      endpoints: [endpoint],
+      transport: async () => ({ status: 200, body: old.ciphertext }),
+    };
+    const delivered = await group.image.read(profile);
+    expect(delivered.kind).toBe("available");
+    const identity = getGroupImageSnapshotIdentity(old.metadata);
+    const owned = imageCache(group.image).cache.get(identity)!.bytes;
+    await setImage(null);
+    await advance();
+    await group.session.save(true);
+    expect(
+      group.session
+        .retainedStates()
+        .map((state) => Number(state.groupContext.epoch)),
+    ).toEqual([3, 2]);
+    expect(imageCache(group.image).cache.has(identity)).toBe(true);
+    await group.save(true);
+    expect(imageCache(group.image).cache.has(identity)).toBe(false);
+    expect(owned).toEqual(new Uint8Array(4));
+    expect(imageCache(group.image).cacheBytes).toBe(0);
+    expect(imageCache(group.image).plaintext.has(owned)).toBe(false);
+    if (delivered.kind === "available")
+      expect(delivered.bytes).toEqual(Uint8Array.of(0, 255, 128, 1));
+    await group.save(true);
+    group.dispose();
+    if (delivered.kind === "available")
+      expect(delivered.bytes).toEqual(Uint8Array.of(0, 255, 128, 1));
+  });
+
+  for (const horizon of [1, Infinity])
+    it(`preserves current and retained image identities with horizon ${horizon}`, async () => {
+      const { group, setImage, advance } = await retentionFixture(horizon);
+      const first = encryptGroupImage(Uint8Array.of(0, 255), "image/png");
+      const second = encryptGroupImage(Uint8Array.of(128, 1), "image/jpeg");
+      let body = first.ciphertext;
+      const transport = vi.fn(async () => ({ status: 200, body }));
+      const profile = { endpoints: [endpoint], transport };
+      await group.save(true); // Empty cache is a no-op.
+      await setImage(first.metadata);
+      expect((await group.image.read(profile)).kind).toBe("available");
+      const identity = getGroupImageSnapshotIdentity(first.metadata);
+      const owned = imageCache(group.image).cache.get(identity)!.bytes;
+      await group.save(true); // One current entry is a no-op.
+      expect(imageCache(group.image).cache.get(identity)!.bytes).toBe(owned);
+      await setImage(second.metadata);
+      body = second.ciphertext;
+      expect((await group.image.read(profile)).kind).toBe("available");
+      await group.save(true);
+      expect(imageCache(group.image).cache.size).toBe(2);
+      expect(owned).toEqual(Uint8Array.of(0, 255));
+      await advance();
+      await group.save(true);
+      expect(imageCache(group.image).cache.has(identity)).toBe(
+        horizon === Infinity,
+      );
+      expect(await group.image.read(profile)).toMatchObject({
+        kind: "available",
+        bytes: Uint8Array.of(128, 1),
+      });
+      expect(transport).toHaveBeenCalledTimes(2);
+      group.dispose();
+    });
+
+  it("preserves a genuine retained sibling image absent from the canonical media view", async () => {
+    const { group, setImage, advance } = await retentionFixture();
+    const image = encryptGroupImage(Uint8Array.of(0, 128, 255), "image/png");
+    await setImage(image.metadata);
+    expect(
+      (
+        await group.image.read({
+          endpoints: [endpoint],
+          transport: async () => ({ status: 200, body: image.ciphertext }),
+        })
+      ).kind,
+    ).toBe("available");
+    await setImage(null);
+    const parentTag = bytesToHex(group.state.confirmationTag);
+    const parent = (await group.forkTree.stateAt(parentTag))!;
+    const sibling = await createCommit({
+      context: {
+        cipherSuite: group.ciphersuite,
+        authService: marmotAuthService,
+      },
+      state: parent,
+      extraProposals: [
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: 0x8002,
+            operation: "update",
+            update: encodeGroupBlossomImage(image.metadata),
+          },
+        },
+      ],
+      wireAsPublicMessage: true,
+    });
+    await advance();
+    group.forkTree.recordCommit(parentTag, sibling.commit, sibling.newState);
+    await group.save(true);
+    const identity = getGroupImageSnapshotIdentity(image.metadata);
+    expect(
+      group.session.retainedStates().every((state) => {
+        const source = new GroupImageService({
+          getState: () => state,
+          isClosed: () => false,
+        }).source();
+        return source.kind !== "blossom";
+      }),
+    ).toBe(true);
+    expect(
+      group.forkTree.hasNode(bytesToHex(sibling.newState.confirmationTag)),
+    ).toBe(true);
+    expect(imageCache(group.image).cache.get(identity)!.bytes).toEqual(
+      Uint8Array.of(0, 128, 255),
+    );
+    group.dispose();
+  });
+
+  it("preserves an exactly pinned historical image until actual publication acknowledgement", async () => {
+    const { group, setImage, advance } = await retentionFixture();
+    const image = encryptGroupImage(Uint8Array.of(255, 128), "image/png");
+    await setImage(image.metadata);
+    expect(
+      (
+        await group.image.read({
+          endpoints: [endpoint],
+          transport: async () => ({ status: 200, body: image.ciphertext }),
+        })
+      ).kind,
+    ).toBe("available");
+    const work = (
+      await group.session.send({
+        kind: "applicationMessage",
+        payload: Uint8Array.of(0, 255),
+      })
+    ).publish[0]!;
+    await setImage(null);
+    await advance();
+    await group.save(true);
+    const identity = getGroupImageSnapshotIdentity(image.metadata);
+    const owned = imageCache(group.image).cache.get(identity)!.bytes;
+    expect(owned).toEqual(Uint8Array.of(255, 128));
+    await group.runtime.publishApplication(work.envelope);
+    await group.save(true);
+    expect(imageCache(group.image).cache.has(identity)).toBe(false);
+    expect(owned).toEqual(new Uint8Array(2));
+    group.dispose();
+  });
+
+  it("keeps an active cache waiter identity and private copies through retirement and rewind", async () => {
+    const { service, image, set } = canonicalFixture();
+    const policy = vi.fn().mockResolvedValue(true);
+    const profile = {
+      endpoints: [endpoint],
+      contactPolicy: policy,
+      transport: async () => ({ status: 200, body: image.ciphertext }),
+    };
+    expect((await service.read(profile)).kind).toBe("available");
+    const identity = getGroupImageSnapshotIdentity(image.metadata);
+    const owned = imageCache(service).cache.get(identity)!.bytes;
+    const gate = deferred<boolean>();
+    policy
+      .mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => gate.promise);
+    const pending = service.read(profile);
+    await vi.waitFor(() => expect(policy).toHaveBeenCalledTimes(5));
+    set(null);
+    service.retireRetained();
+    expect(imageCache(service).cache.get(identity)!.bytes).toBe(owned);
+    expect(
+      [...imageCache(service).plaintext].every((bytes) =>
+        bytes.some((byte) => byte !== 0),
+      ),
+    ).toBe(true);
+    set(image.metadata); // Existing source validation permits a restored identity.
+    gate.resolve(true);
+    expect(await pending).toMatchObject({
+      kind: "available",
+      bytes: Uint8Array.of(1, 2, 3),
+    });
+    set(null);
+    service.retireRetained();
+    service.retireRetained();
+    expect(owned).toEqual(new Uint8Array(3));
+    expect(imageCache(service).cacheBytes).toBe(0);
+    service.close();
+  });
+
+  it.each(["rewind", "cancel"] as const)(
+    "does not disturb in-flight physical reads during retirement and %s",
+    async (outcome) => {
+      const { service, image, set } = canonicalFixture();
+      const response = deferred<GroupImageTransportResponse>();
+      const transport = vi.fn(() => response.promise);
+      const controller = new AbortController();
+      const pending = service.read(
+        { endpoints: [endpoint], transport },
+        { signal: controller.signal },
+      );
+      await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+      set(null);
+      service.retireRetained();
+      if (outcome === "cancel") controller.abort();
+      else set(image.metadata);
+      response.resolve({ status: 200, body: image.ciphertext });
+      if (outcome === "cancel")
+        expect(await pending).toEqual({
+          kind: "unavailable",
+          reason: "cancelled",
+        });
+      else
+        expect(await pending).toMatchObject({
+          kind: "available",
+          bytes: Uint8Array.of(1, 2, 3),
+        });
+      service.close();
+    },
+  );
+
+  it.each(["failure", "changed-membership"] as const)(
+    "defers optional cache capture on %s without failing a durable save",
+    async (mode) => {
+      const { group, setImage, advance } = await retentionFixture();
+      const image = encryptGroupImage(Uint8Array.of(128, 255), "image/png");
+      await setImage(image.metadata);
+      expect(
+        (
+          await group.image.read({
+            endpoints: [endpoint],
+            transport: async () => ({ status: 200, body: image.ciphertext }),
+          })
+        ).kind,
+      ).toBe("available");
+      await setImage(null);
+      await advance();
+      await group.session.save(true);
+      const identity = getGroupImageSnapshotIdentity(image.metadata);
+      const gate = deferred<void>();
+      let entered = false;
+      const stateAt = group.forkTree.stateAt.bind(group.forkTree);
+      const capture = vi
+        .spyOn(group.forkTree, "stateAt")
+        .mockImplementationOnce(async (tag) => {
+          entered = true;
+          if (mode === "failure")
+            throw new Error("optional snapshot read failed");
+          await gate.promise;
+          return stateAt(tag);
+        });
+      const saving = group.save(true);
+      if (mode === "changed-membership") {
+        await vi.waitFor(() => expect(entered).toBe(true));
+        await advance();
+        gate.resolve();
+      }
+      await expect(saving).resolves.toBeUndefined();
+      expect(imageCache(group.image).cache.has(identity)).toBe(true);
+      capture.mockRestore();
+      await group.save(true);
+      expect(imageCache(group.image).cache.has(identity)).toBe(false);
+      group.dispose();
+    },
+  );
+});
 describe("strict Blossom service", () => {
   it("close wipes plaintext retained by a deferred delivery policy", async () => {
     const { service, image } = canonicalFixture();

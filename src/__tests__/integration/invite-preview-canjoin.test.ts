@@ -13,11 +13,11 @@ import type { UnreadInvite } from "../../client/invite-manager.js";
 import { SerializedClientState } from "../../core/client-state.js";
 import { ADDRESSABLE_KEY_PACKAGE_KIND } from "../../core/protocol.js";
 import { MockNetwork } from "../helpers/mock-network.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 
 describe("invite preview + canJoin (MarmotClient)", () => {
-  let adminAccount: PrivateKeyAccount<any>;
-  let inviteeAccount: PrivateKeyAccount<any>;
+  let adminAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
+  let inviteeAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
   let ciphersuite: CiphersuiteImpl;
   let mockNetwork: MockNetwork;
   let adminClient: MarmotClient;
@@ -74,10 +74,7 @@ describe("invite preview + canJoin (MarmotClient)", () => {
       kinds: [1059],
       "#p": [inviteePubkey],
     });
-    return (await unlockGiftWrap(
-      giftWraps[0],
-      inviteeAccount.signer,
-    )) as UnreadInvite;
+    return await unlockGiftWrap(giftWraps[0], inviteeAccount.signer);
   }
 
   it("canJoinInvite is true while the target KeyPackage is held, false for a stranger", async () => {
@@ -128,10 +125,12 @@ describe("invite preview + canJoin (MarmotClient)", () => {
     void welcome;
 
     const iterator = inviteeClient.watchInvites();
-    const { value } = await iterator.next();
-    void iterator.return?.(undefined);
+    const { value, done } = await iterator.next();
+    await iterator.return(undefined);
 
+    if (done)
+      throw new Error("Invite watcher completed before its first batch");
     expect(value).toHaveLength(1);
-    expect(value![0].joinable).toBe(true);
+    expect(value[0].joinable).toBe(true);
   });
 });

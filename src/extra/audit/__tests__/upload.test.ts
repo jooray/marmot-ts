@@ -43,43 +43,49 @@ describe("uploadAuditLogFile", () => {
   });
 
   it("posts NDJSON to a loopback endpoint without a token", async () => {
-    const fetch = vi.fn(async () => new Response(null, { status: 200 }));
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
     const result = await uploadAuditLogFile(
       path,
       "http://127.0.0.1:4000/upload",
-      { fetch: fetch as unknown as typeof globalThis.fetch },
+      { fetch },
     );
 
     expect(result).toEqual({ path, status: 200, bytesSent: 20 });
     expect(fetch).toHaveBeenCalledOnce();
     const [, init] = fetch.mock.calls[0]!;
     expect(init?.method).toBe("POST");
-    const headers = init?.headers as Record<string, string>;
-    expect(headers["Content-Type"]).toBe("application/x-ndjson");
-    expect(headers["Content-Length"]).toBe("20");
-    expect(headers["Authorization"]).toBeUndefined();
+    const headers = new Headers(init?.headers);
+    expect(headers.get("Content-Type")).toBe("application/x-ndjson");
+    expect(headers.get("Content-Length")).toBe("20");
+    expect(headers.get("Authorization")).toBeNull();
   });
 
   it("sends bearer + source headers for an https endpoint", async () => {
-    const fetch = vi.fn(async () => new Response(null, { status: 202 }));
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () => new Response(null, { status: 202 }),
+    );
     await uploadAuditLogFile(path, "https://goggles.example/upload", {
       bearerToken: "secret",
       source: { deviceLabel: "alice", platform: "linux", appVersion: "x/1" },
-      fetch: fetch as unknown as typeof globalThis.fetch,
+      fetch,
     });
 
-    const headers = fetch.mock.calls[0]![1]?.headers as Record<string, string>;
-    expect(headers["Authorization"]).toBe("Bearer secret");
-    expect(headers["X-Goggles-Device-Label"]).toBe("alice");
-    expect(headers["X-Goggles-Platform"]).toBe("linux");
-    expect(headers["X-Goggles-App-Version"]).toBe("x/1");
+    const headers = new Headers(fetch.mock.calls[0]![1]?.headers);
+    expect(headers.get("Authorization")).toBe("Bearer secret");
+    expect(headers.get("X-Goggles-Device-Label")).toBe("alice");
+    expect(headers.get("X-Goggles-Platform")).toBe("linux");
+    expect(headers.get("X-Goggles-App-Version")).toBe("x/1");
   });
 
   it("normalizes a non-2xx response to HTTP <status>", async () => {
-    const fetch = vi.fn(async () => new Response(null, { status: 503 }));
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () => new Response(null, { status: 503 }),
+    );
     await expect(
       uploadAuditLogFile(path, "http://localhost:4000/upload", {
-        fetch: fetch as unknown as typeof globalThis.fetch,
+        fetch,
       }),
     ).rejects.toThrow("HTTP 503");
   });

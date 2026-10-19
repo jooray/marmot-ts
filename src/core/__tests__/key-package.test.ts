@@ -13,12 +13,12 @@ import {
   makeKeyPackageRef,
   makeCustomExtension,
   protocolVersions,
+  type Credential,
 } from "ts-mls";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 
 import { createCredential } from "../credential.js";
 import {
@@ -30,6 +30,7 @@ import { appDataDictionaryExtensionType, getAppDataDictionary } from "ts-mls";
 import {
   decodeAuthorizationProof,
   AuthorizationProofError,
+  type AuthorizationProofSigner,
 } from "../authorization-proof.js";
 import {
   ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
@@ -212,7 +213,10 @@ const LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE = 0xf2f1;
 const ZERO_AUX = new Uint8Array(32);
 
 /** Signs `draft` with `secretKey`, mirroring a real external Nostr signer. */
-function signWith(secretKey: Uint8Array, draft: UnsignedEvent) {
+function signWith(
+  secretKey: Uint8Array,
+  draft: Parameters<AuthorizationProofSigner["signEvent"]>[0],
+) {
   const pubkey = bytesToHex(schnorr.getPublicKey(secretKey));
   const unsigned: UnsignedEvent = { ...draft, pubkey };
   const id = getEventHash(unsigned);
@@ -307,8 +311,8 @@ describe("generateKeyPackage", () => {
         SUITE,
         defaultCryptoProvider,
       );
-      const externalSigner = {
-        signEvent: async (draft: UnsignedEvent) => signWith(secretKey, draft),
+      const externalSigner: AuthorizationProofSigner = {
+        signEvent: async (draft) => signWith(secretKey, draft),
       };
 
       const keyPackage = await generateKeyPackage({
@@ -368,9 +372,8 @@ describe("generateKeyPackage", () => {
     it("rejects a signer whose returned pubkey differs from the credential (returned-pubkey-mismatch)", async () => {
       const otherSecretKey = new Uint8Array(32);
       otherSecretKey[31] = 99;
-      const wrongKeySigner = {
-        signEvent: async (draft: UnsignedEvent) =>
-          signWith(otherSecretKey, draft),
+      const wrongKeySigner: AuthorizationProofSigner = {
+        signEvent: async (draft) => signWith(otherSecretKey, draft),
       };
       const ciphersuiteImpl = await getCiphersuiteImpl(
         SUITE,
@@ -660,9 +663,9 @@ describe("generateKeyPackage", () => {
 
   it("should throw error for non-basic credential", async () => {
     const invalidCredential = {
-      credentialType: "x509" as any,
-      identity: new Uint8Array(32),
-    };
+      credentialType: defaultCredentialTypes.x509,
+      certificates: [new Uint8Array(32)],
+    } satisfies Credential;
 
     const ciphersuiteImpl = await getCiphersuiteImpl(
       SUITE,

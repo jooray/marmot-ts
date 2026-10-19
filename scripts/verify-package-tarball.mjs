@@ -10,13 +10,14 @@
 // cannot be republished under that version).
 //
 // Used by `pnpm release`, `scripts/release-next.sh`, and `scripts/package-smoke/run.sh`.
-// Uses only Node.js builtins.
+// Uses Node.js builtins and the shared TypeScript-backed package guard helper.
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { manifestPackageReferences } from "./package-checks.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -110,16 +111,8 @@ function verifyManifest(tarballPath) {
   }
 
   const forkName = "ts-mls";
-  for (const field of [
-    "dependencies",
-    "peerDependencies",
-    "optionalDependencies",
-    "bundleDependencies",
-  ]) {
-    const section = pkg[field];
-    if (section && Object.prototype.hasOwnProperty.call(section, forkName)) {
-      fail(`packed manifest still lists "${forkName}" under ${field}`);
-    }
+  for (const field of manifestPackageReferences(pkg, forkName)) {
+    fail(`packed manifest still lists "${forkName}" under ${field}`);
   }
 
   const expectedOptionalPeers = {

@@ -6,6 +6,7 @@ import { decode, encode, mlsMessageDecoder, mlsMessageEncoder } from "ts-mls";
 import { deserializeApplicationData } from "../../core/application-rumor.js";
 import type { DeliveredAppPayload } from "../../engine/delivered-payloads.js";
 import type { GroupHistoryTree } from "../../engine/history-tree.js";
+import { framedEpoch } from "../../engine/wire-format.js";
 import { defaultVerifyEvent, safeVerifyEvent } from "../verify.js";
 
 export type DeliveredEvidence = {
@@ -59,6 +60,7 @@ export function decodeDeliveredEvidence(
     if (
       !node ||
       !Number.isSafeInteger(entry.epoch) ||
+      entry.epoch < 0 ||
       entry.epoch !== node.epoch
     )
       throw new Error("Invalid delivered evidence branch");
@@ -80,6 +82,7 @@ export function decodeDeliveredEvidence(
     const message = decode(mlsMessageDecoder, messageBytes);
     if (
       !message ||
+      framedEpoch(message) !== BigInt(entry.epoch) ||
       bytesToHex(encode(mlsMessageEncoder, message)) !== entry.message
     )
       throw new Error("Invalid delivered evidence MLS message");

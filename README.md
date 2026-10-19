@@ -51,7 +51,7 @@ You can optionally supply:
 
 - **`inviteStore`** — persists received invites; defaults to an in-memory store.
 - **`historyFactory`** — wires a per-group message history backend (see [`GroupRumorHistory`](docs/client/history.md)).
-- **`clientId`** — a stable `d`-tag slot for your published kind 30443 key packages.
+- **`clientId`** — a stable `d`-tag slot: 32 random bytes encoded as 64 lowercase hex characters, persisted and reused for your kind 30443 key packages.
 
 The client exposes three managers — `client.groups`, `client.keyPackages`, and `client.invites` — plus `client.network` and the `joinGroupFromWelcome` entry point.
 
@@ -91,13 +91,17 @@ const keyPackageStore = new InMemoryKeyValueStore();
 
 ```ts
 import { MarmotClient } from "@internet-privacy/marmot-ts";
+import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
+
+// Generate once per installation, persist it, and load the same slot on restart.
+const clientId = bytesToHex(randomBytes(32));
 
 const client = new MarmotClient({
   signer, // your EventSigner (e.g. from applesauce-core)
   network, // your NostrNetworkInterface implementation
   groupStateStore, // GenericKeyValueStore<SerializedClientState>
   keyPackageStore, // GenericKeyValueStore<StoredKeyPackage>
-  clientId: "my-app-desktop", // stable d-tag for kind 30443 key packages
+  clientId, // persisted random slot; arbitrary device labels are rejected
 });
 ```
 
@@ -248,16 +252,29 @@ Full documentation is in `docs/` and served via VitePress. Run `pnpm docs:dev` t
 
 - **[Getting Started](docs/getting-started.md)** — first-run walkthrough
 - **[Architecture](docs/guide/architecture.md)** — component overview and Nostr/MLS mapping
-- **[Client Module](docs/client/)** — `MarmotClient`, `MarmotGroup`, storage, network, UI integration
-- **[Core Module](docs/core/)** — protocol, credentials, key packages, groups, messages, welcome
+- **[Client Module](docs/client/index.md)** — `MarmotClient`, `MarmotGroup`, storage, network, UI integration
+- **[Core Module](docs/core/index.md)** — protocol, credentials, key packages, groups, messages, welcome
+
+`pnpm docs:build` also generates the API reference beside the topic guides. See
+[message helpers](docs/core/messages.md#message-classification),
+[founding retries](docs/client/marmot-group.md#founding-welcome-delivery-and-retry),
+and [storage upgrades](docs/client/storage.md#upgrading-existing-stores) for the
+verified narrowing, delivery, and checkpoint boundaries.
 
 ## Development
 
+Use Node.js 20+ and pnpm 10. Test-source typing is an explicit command, separate
+from runtime tests and watch mode; the Node 20/22/24 CI matrix enforces it.
+
 ```bash
-pnpm install    # Install dependencies
-pnpm build      # Compile TypeScript and bundle the ts-mls fork
-pnpm test       # Run tests (watch mode)
-pnpm format     # Format code with Prettier
-pnpm docs:dev   # Serve documentation locally
-pnpm docs:build # Build documentation
+pnpm install --frozen-lockfile # Install declared dependencies
+pnpm build                    # Compile and vendor the ts-mls fork
+pnpm typecheck:tests           # Strictly check all src tests and helpers
+pnpm vitest run               # Run runtime tests once
+pnpm test                     # Run runtime tests in watch mode
+pnpm format                   # Format code with Prettier
+pnpm docs:dev                 # Serve topic guides locally
+pnpm docs:build               # Build guides and generate the API reference
 ```
+
+See [Contributing](CONTRIBUTING.md) for the complete validation workflow.

@@ -12,6 +12,7 @@ import {
 } from "../../audit/index.js";
 import type { PendingState } from "../../engine/types.js";
 import type { StateNotification } from "../../engine/state-notifications.js";
+import { confirmPublicationRetention } from "./publication-retention.js";
 import { hasAck } from "../../utils/index.js";
 import type {
   GroupEffects,
@@ -395,6 +396,7 @@ export class GroupRuntime {
     }
 
     this.#emitPublishOutcome(envelope, "group", response, true);
+    confirmPublicationRetention(this, envelope.id);
     return response;
   }
 

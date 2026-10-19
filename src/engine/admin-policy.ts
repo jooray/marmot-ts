@@ -37,6 +37,7 @@ import {
 } from "../core/components/ids.js";
 import {
   type CommitIntegrityViolation,
+  type CommitLegalityOutcome,
   validateAddProposalAccountIdentityProofs,
   validateUpdateProposalAccountIdentityProofs,
 } from "../core/components/integrity.js";
@@ -156,13 +157,13 @@ export function requiredComponentIdsOf(
  * 2. no component id carries more than one `AppDataUpdate` operation in the
  *    batch, and `app_components` (`0x0001`) is never removed (MDK batch loop 1);
  * 3. every `update` targets an id that is legal GroupContext state
- *    ({@link NON_GROUP_CONTEXT_COMPONENT_IDS}) and, for a known component id,
+ *    (the internal `NON_GROUP_CONTEXT_COMPONENT_IDS` check) and, for a known component id,
  *    carries a payload that decodes with that component's codec. Without this,
  *    one AppDataUpdate — which the admin gate admits from any member as a
  *    standalone proposal, and which a later commit bundles by reference —
  *    could poison the group dictionary with bytes no member can decode;
  * 4. every `remove` targets an id that is neither structurally unremovable
- *    ({@link UNREMOVABLE_COMPONENT_IDS}) nor present in the RESULTING required
+ *    (the internal `UNREMOVABLE_COMPONENT_IDS` set) nor present in the RESULTING required
  *    list (MDK batch loop 2).
  *
  * `requiredIds` is the PARENT epoch's required-component list
@@ -394,6 +395,35 @@ export function createAdminCommitPolicyCallback(args: {
   };
 }
 
+export interface CapturedCommit {
+  proposals: ProposalWithSender[];
+  committerLeafIndex: number | undefined;
+  /** True only when the authenticated commit callback supplied its proposals. */
+  complete: boolean;
+}
+
+/** Share the terminal attribution rule across ingest, replay, and tree sweep. */
+export function resolveCapturedCommitLegality(
+  outcome: CommitLegalityOutcome,
+  captured: CapturedCommit,
+): CommitLegalityOutcome {
+  if (
+    outcome.kind === "undecidable" &&
+    captured.complete &&
+    captured.committerLeafIndex === undefined
+  ) {
+    return {
+      kind: "violation",
+      violation: {
+        reason: "account-identity-proof",
+        proofReason: "unattributable-leaf",
+        detail: outcome.detail,
+      },
+    };
+  }
+  return outcome;
+}
+
 /**
  * A pure side-channel decorator around an `IncomingMessageCallback`, used to
  * capture a commit's own proposals for the WIRE-03/CONV-01 commit-legality
@@ -426,7 +456,9 @@ export function createAdminCommitPolicyCallback(args: {
  * (Pitfall 1 — validating inside the callback runs before the resulting
  * `GroupContext` exists and would produce wrong verdicts or throw mid-apply).
  *
- * Contract: `take()` returns the buffered proposals and clears the buffer.
+ * Contract: `take()` returns the buffered proposals, committer, and whether a
+ * commit callback completed the capture, then resets all three. A standalone
+ * proposal does not complete a commit capture.
  * Callers MUST call `take()` immediately before each `processMessage` call
  * (discarding the result, to clear any stale proposals left over from a
  * prior message) and again immediately after `processMessage` returns (to
@@ -436,18 +468,17 @@ export function createAdminCommitPolicyCallback(args: {
  */
 export function withCapturedProposals(inner: IncomingMessageCallback): {
   callback: IncomingMessageCallback;
-  take(): {
-    proposals: ProposalWithSender[];
-    committerLeafIndex: number | undefined;
-  };
+  take(): CapturedCommit;
 } {
   let buffered: ProposalWithSender[] = [];
   let committerLeafIndex: number | undefined;
+  let complete = false;
 
   const callback: IncomingMessageCallback = (incoming) => {
     if (incoming.kind === "commit") {
       buffered = buffered.concat(incoming.proposals);
       committerLeafIndex = incoming.senderLeafIndex;
+      complete = true;
     } else if (incoming.kind === "proposal") {
       buffered = buffered.concat(incoming.proposal);
     }
@@ -455,9 +486,10 @@ export function withCapturedProposals(inner: IncomingMessageCallback): {
   };
 
   const take = () => {
-    const result = { proposals: buffered, committerLeafIndex };
+    const result = { proposals: buffered, committerLeafIndex, complete };
     buffered = [];
     committerLeafIndex = undefined;
+    complete = false;
     return result;
   };
 

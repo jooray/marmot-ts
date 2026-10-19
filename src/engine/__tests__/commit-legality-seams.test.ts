@@ -464,7 +464,9 @@ describe("commit-legality seams (WIRE-03/CONV-01) — inbound vs replay parity",
     await expect(send).rejects.toMatchObject({
       name: "CommitLegalityError",
       violation: { reason: "component-integrity" },
-    } satisfies Partial<CommitLegalityError>);
+    } satisfies Pick<CommitLegalityError, "name"> & {
+      violation: Pick<CommitLegalityError["violation"], "reason">;
+    });
   });
 
   it("drops the violating commit as a fork-recovery candidate edge — no branch adopted, no history-tree edge (replay parity)", async () => {

@@ -57,6 +57,35 @@ async function drain<T>(gen: AsyncIterable<T>): Promise<T[]> {
 }
 
 describe("MarmotGroupEngine ingestion pool", () => {
+  it("preserves equality and unknown epochs while retiring obsolete tag references", () => {
+    const pool = new IngestionPool<{ id: string }>({ maxRewindCommits: 2 });
+    pool.add("below", { id: "below" }, 2);
+    pool.add("equal", { id: "equal" }, 3);
+    pool.add("above", { id: "above" }, 4);
+    pool.add("unsafe", { id: "unsafe" }, Number.MAX_SAFE_INTEGER + 1);
+    pool.add("opaque", { id: "opaque" });
+    for (const entry of pool.entries()) {
+      entry.triedTags.add("old");
+      entry.triedTags.add("kept");
+    }
+    expect(pool.evictStale(5).map((entry) => entry.id)).toEqual(["below"]);
+    expect(pool.entries().map((entry) => entry.id)).toEqual([
+      "equal",
+      "above",
+      "unsafe",
+      "opaque",
+    ]);
+    expect(
+      pool.entries().find((entry) => entry.id === "unsafe")!.sourceEpoch,
+    ).toBeUndefined();
+    pool.commitRetention(["kept"]);
+    expect(
+      pool.entries().every((entry) => [...entry.triedTags].join() === "kept"),
+    ).toBe(true);
+    expect(pool.evictStale(Number.MAX_SAFE_INTEGER + 1)).toEqual([]);
+    expect(pool.size).toBe(4);
+  });
+
   it("holds a future-epoch event delivered before its commit, then reads it once the epoch is reached", async () => {
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",

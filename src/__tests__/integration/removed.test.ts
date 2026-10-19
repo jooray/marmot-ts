@@ -1,5 +1,4 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { EventSigner } from "applesauce-core";
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import { EventEmitter } from "eventemitter3";
 import {
@@ -11,7 +10,6 @@ import {
   encode,
   getCiphersuiteImpl,
   joinGroup,
-  type MlsMessage,
   mlsMessageEncoder,
   processMessage,
   type ProposalRemove,
@@ -21,10 +19,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { MarmotGroup } from "../../client/group/marmot-group.js";
 import { GroupsManager } from "../../client/groups-manager.js";
-import type {
-  NostrNetworkInterface,
-  PublishResponse,
-} from "../../client/nostr-interface.js";
+import type { NostrNetworkInterface } from "../../client/nostr-interface.js";
 import {
   deserializeClientState,
   serializeClientState,
@@ -35,10 +30,11 @@ import { createCredential } from "../../core/credential.js";
 import { createGroupEvent } from "../../core/group-message.js";
 import { createSimpleGroup } from "../../core/group.js";
 import { generateKeyPackage } from "../../core/key-package.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import { testAccount } from "../helpers/test-accounts.js";
 import { GroupHistoryTree } from "../../engine/history-tree.js";
 import type { GenericKeyValueStore } from "../../utils/key-value.js";
+import type { DispositionedIngestResult } from "../../client/session/group-session.js";
 
 const RELAY = "wss://relay.test";
 
@@ -53,7 +49,7 @@ function recordingNetwork(published: NostrEvent[]): NostrNetworkInterface {
     },
     publish: async (_relays, event) => {
       published.push(event);
-      return { [RELAY]: { ok: true } as PublishResponse };
+      return { [RELAY]: { from: RELAY, ok: true } };
     },
     getUserInboxRelays: async () => {
       throw new Error("not used");
@@ -66,12 +62,17 @@ function marmotGroup(
   pubkey: string,
   impl: CiphersuiteImpl,
   published: NostrEvent[],
-  store = new InMemoryKeyValueStore<SerializedClientState>(),
+  store: GenericKeyValueStore<SerializedClientState> = new InMemoryKeyValueStore<SerializedClientState>(),
   removedMarkerStore?: GenericKeyValueStore<boolean>,
 ) {
   return new MarmotGroup(state, {
     store,
-    signer: { getPublicKey: async () => pubkey } as EventSigner,
+    signer: {
+      getPublicKey: async () => pubkey,
+      signEvent: async () => {
+        throw new Error("Nostr identity signing is not used in this fixture");
+      },
+    },
     ciphersuite: impl,
     network: recordingNetwork(published),
     removedMarkerStore,
@@ -138,7 +139,8 @@ async function buildRemovalFixture() {
     ],
     ratchetTreeExtension: true,
   });
-  const welcomeMsg = welcome!.welcome ?? (welcome as never);
+  if (!welcome) throw new Error("Member Add commit did not produce a Welcome");
+  const welcomeMsg = welcome.welcome;
   const eEpoch1 = await joinGroup({
     context: ctx,
     welcome: welcomeMsg,
@@ -253,8 +255,38 @@ describe("involuntary removal signal", () => {
     const { impl, ePubkey, eEpoch1, removeCommitEvent } =
       await buildRemovalFixture();
     const shared = new InMemoryKeyValueStore<SerializedClientState | boolean>();
-    const stateStore = shared as GenericKeyValueStore<SerializedClientState>;
-    const markerStore = shared as GenericKeyValueStore<boolean>;
+    // Both typed adapters deliberately share one backend: namespace isolation
+    // is the behavior under test, so do not replace it with separate stores.
+    const stateStore: GenericKeyValueStore<SerializedClientState> = {
+      getItem: async (key) => {
+        const value = await shared.getItem(key);
+        if (typeof value === "boolean")
+          throw new Error("Marker overwrote MLS state");
+        return value;
+      },
+      setItem: async (key, value) => {
+        await shared.setItem(key, value);
+        return value;
+      },
+      removeItem: (key) => shared.removeItem(key),
+      clear: () => shared.clear(),
+      keys: () => shared.keys(),
+    };
+    const markerStore: GenericKeyValueStore<boolean> = {
+      getItem: async (key) => {
+        const value = await shared.getItem(key);
+        if (value !== null && typeof value !== "boolean")
+          throw new Error("MLS state overwrote marker");
+        return value;
+      },
+      setItem: async (key, value) => {
+        await shared.setItem(key, value);
+        return value;
+      },
+      removeItem: (key) => shared.removeItem(key),
+      clear: () => shared.clear(),
+      keys: () => shared.keys(),
+    };
     const group = marmotGroup(
       eEpoch1,
       ePubkey,
@@ -294,9 +326,15 @@ describe("involuntary removal signal", () => {
 
     const manager = new GroupsManager({
       store: stateStore,
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+      ingestPersistence: {
+        kind: "ephemeral",
+        reason: "ingest_state_store_omitted",
+      },
       rewindStore,
       removedMarkerStore,
-      signer: { getPublicKey: async () => fixture.ePubkey } as EventSigner,
+      signer: testAccount(11).signer,
       network: recordingNetwork([]),
       cryptoProvider: defaultCryptoProvider,
     });
@@ -319,12 +357,18 @@ describe("involuntary removal signal", () => {
     const read = new Promise<boolean | null>(
       (resolve) => (releaseRead = resolve),
     );
-    const getItem = vi.fn(async () => read);
-    const setItem = vi.fn(async () => undefined);
+    const getItem = vi.fn<GenericKeyValueStore<boolean>["getItem"]>(
+      async () => read,
+    );
+    const setItem = vi.fn<GenericKeyValueStore<boolean>["setItem"]>(
+      async (_key, value) => value,
+    );
     const removedMarkerStore: GenericKeyValueStore<boolean> = {
       getItem,
       setItem,
       removeItem: vi.fn(async () => undefined),
+      clear: vi.fn(async () => undefined),
+      keys: vi.fn(async () => []),
     };
     const group = marmotGroup(
       fixture.removedState,
@@ -354,14 +398,22 @@ describe("involuntary removal signal", () => {
       .fn<GenericKeyValueStore<boolean>["getItem"]>()
       .mockRejectedValueOnce(new Error("marker unavailable"))
       .mockResolvedValueOnce(null);
-    const setItem = vi.fn(async () => undefined);
+    const setItem = vi.fn<GenericKeyValueStore<boolean>["setItem"]>(
+      async (_key, value) => value,
+    );
     const group = marmotGroup(
       fixture.removedState,
       fixture.ePubkey,
       fixture.impl,
       [],
       undefined,
-      { getItem, setItem, removeItem: vi.fn(async () => undefined) },
+      {
+        getItem,
+        setItem,
+        removeItem: vi.fn(async () => undefined),
+        clear: vi.fn(async () => undefined),
+        keys: vi.fn(async () => []),
+      },
     );
     const removed = vi.fn();
     group.on("removed", removed);
@@ -447,7 +499,7 @@ describe("involuntary removal signal", () => {
     group.on("removed", throwing, onContext);
     group.once(
       "removed",
-      function (received) {
+      function (this: typeof onceContext, received) {
         expect(this).toBe(onceContext);
         expect(received).toBe(group);
         order.push("once");
@@ -456,7 +508,7 @@ describe("involuntary removal signal", () => {
     );
     group.on(
       "removed",
-      function (received) {
+      function (this: typeof onContext, received) {
         expect(this).toBe(onContext);
         expect(received).toBe(group);
         order.push("observer");
@@ -530,9 +582,11 @@ describe("involuntary removal signal", () => {
       getItem: (key) => inner.getItem(key),
       setItem: async (key, value) => {
         persistedAtMarkerWrite = await eStore.getItem(idHex);
-        await inner.setItem(key, value);
+        return await inner.setItem(key, value);
       },
       removeItem: (key) => inner.removeItem(key),
+      clear: () => inner.clear(),
+      keys: () => inner.keys(),
     };
 
     const eGroup = marmotGroup(
@@ -562,20 +616,24 @@ describe("involuntary removal signal", () => {
     const eGroup = marmotGroup(eEpoch1, ePubkey, impl, []);
     await eGroup.save(true);
 
-    const removedResults: { notifications?: { kind: string }[] }[] = [];
+    const removedResults: Extract<
+      DispositionedIngestResult,
+      { kind: "removed" }
+    >[] = [];
     for await (const r of eGroup.ingest([removeCommitEvent]))
-      if (r.kind === "removed") removedResults.push(r as never);
+      if (r.kind === "removed") removedResults.push(r);
 
     expect(removedResults).toHaveLength(1);
     const notifications = removedResults[0].notifications ?? [];
-    const selfRemoved = notifications.find((n) => n.kind === "selfRemoved") as
-      { kind: "selfRemoved"; commitDigest: Uint8Array } | undefined;
+    const selfRemoved = notifications.find((n) => n.kind === "selfRemoved");
     expect(selfRemoved).toBeDefined();
+    if (!selfRemoved)
+      throw new Error("Removal omitted its selfRemoved notification");
 
     const expectedDigest = bytesToHex(
-      commitDigest(encode(mlsMessageEncoder, commit as MlsMessage)),
+      commitDigest(encode(mlsMessageEncoder, commit)),
     );
-    expect(bytesToHex(selfRemoved!.commitDigest)).toBe(expectedDigest);
+    expect(bytesToHex(selfRemoved.commitDigest)).toBe(expectedDigest);
   });
 
   it("realizes removal exactly once on a first load with an unset marker, and zero times once the marker is set (D-12)", async () => {
@@ -604,7 +662,7 @@ describe("involuntary removal signal", () => {
     const firstLoad = await MarmotGroup.fromClientState(liveGroup.state, {
       store: eStore,
       removedMarkerStore,
-      signer: { getPublicKey: async () => ePubkey } as EventSigner,
+      signer: testAccount(11).signer,
       network: recordingNetwork([]),
     });
     const firstRemoved = vi.fn();
@@ -621,7 +679,7 @@ describe("involuntary removal signal", () => {
     const secondLoad = await MarmotGroup.fromClientState(liveGroup.state, {
       store: eStore,
       removedMarkerStore,
-      signer: { getPublicKey: async () => ePubkey } as EventSigner,
+      signer: testAccount(11).signer,
       network: recordingNetwork([]),
     });
     const secondRemoved = vi.fn();
@@ -675,11 +733,7 @@ describe("involuntary removal signal", () => {
     // while canonical state REMAINS the tombstone (it landed on another
     // branch that also removes us). Stub the session stream to yield exactly
     // the shape the engine produces at such a rewind site.
-    (
-      eGroup.session as unknown as {
-        ingest: (events: NostrEvent[]) => AsyncGenerator<unknown>;
-      }
-    ).ingest = async function* () {
+    eGroup.session.ingest = async function* () {
       yield {
         kind: "stateInvalidated",
         commitDigest: new Uint8Array(32),
@@ -712,16 +766,21 @@ describe("involuntary removal signal", () => {
    * duplicate `removed`. Both assertions below fail on the unplumbed code.
    */
   it("plumbs removedMarkerStore through GroupsManager so realization survives a restart (CR-10)", async () => {
-    const { impl, ePubkey, eEpoch1, removeCommitEvent } =
-      await buildRemovalFixture();
+    const { eEpoch1, removeCommitEvent } = await buildRemovalFixture();
 
     // Backing stores shared across the simulated restart.
     const stateStore = new InMemoryKeyValueStore<SerializedClientState>();
     const removedMarkerStore = new InMemoryKeyValueStore<boolean>();
-    const signer = { getPublicKey: async () => ePubkey } as EventSigner;
+    const signer = testAccount(11).signer;
 
     const managerOptions = {
       store: stateStore,
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+      ingestPersistence: {
+        kind: "ephemeral",
+        reason: "ingest_state_store_omitted",
+      } as const,
       removedMarkerStore,
       signer,
       network: recordingNetwork([]),
@@ -749,10 +808,7 @@ describe("involuntary removal signal", () => {
     // --- process 2: a fresh manager over the same stores (a "restart").
     // `MarmotGroup.fromClientState` realizes internally before returning, so
     // spy on the shared prototype to observe emissions the loader makes.
-    const emitSpy = vi.spyOn(
-      EventEmitter.prototype as unknown as { emit: () => boolean },
-      "emit",
-    );
+    const emitSpy = vi.spyOn(EventEmitter.prototype, "emit");
     try {
       const manager2 = new GroupsManager({
         ...managerOptions,

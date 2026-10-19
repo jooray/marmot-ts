@@ -8,10 +8,7 @@ import {
   deserializeClientState,
   SerializedClientState,
 } from "../core/client-state.js";
-import {
-  type ConvergencePolicy,
-  DEFAULT_CONVERGENCE_POLICY,
-} from "../core/convergence.js";
+import type { ConvergencePolicy } from "../core/convergence.js";
 import { GroupHistoryTree } from "../engine/history-tree.js";
 import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
 import type { AuditContextOptions, AuditSink } from "../audit/index.js";
@@ -215,40 +212,79 @@ export class GroupRegistry<
       ? await this.#retainedFromTree(historyTree, state)
       : undefined;
 
-    return this.build(state, retained, historyTree);
+    const group = await this.build(state, retained, historyTree);
+    await group.session.hydrateRemovalEvidence();
+    return group;
   }
 
   /**
-   * Rehydrates the full-fork history tree for a group, or `undefined` to start
-   * fresh. Discards a tree that does not contain the loaded tip state as a node
-   * (a torn write), so a fresh tree is seeded from the tip instead.
+   * Rehydrates durable history before constructing an admitted session. A
+   * committed checkpoint is authority: required loss must never reseed the tip.
    */
   async #loadHistory(
     idHex: string,
     state: ClientState,
   ): Promise<GroupHistoryTree | undefined> {
     if (!this.rewindStore) return undefined;
-    try {
-      const tree = await GroupHistoryTree.load(this.rewindStore, idHex);
-      if (!tree) return undefined;
-      const tipTag = bytesToHex(state.confirmationTag);
-      if (!tree.hasNode(tipTag)) {
-        log("discarding stale history tree for %s (missing tip node)", idHex);
-        return undefined;
-      }
-      return tree;
-    } catch (error) {
-      log("failed to rehydrate history tree for %s: %o", idHex, error);
+    const metadata = await this.rewindStore.getItem(`${idHex}/meta`);
+    if (!metadata) {
+      // Absence is optional only when no owned history was ever persisted.
+      // Neighboring groups and arbitrary adapter data are not history evidence.
+      const prefixes = ["edge", "state", "commit"].map(
+        (kind) => `${idHex}/${kind}/`,
+      );
+      const owned = (await this.rewindStore.keys()).some((key) =>
+        prefixes.some(
+          (prefix) =>
+            key.startsWith(prefix) &&
+            /^[0-9a-f]+$/.test(key.slice(prefix.length)),
+        ),
+      );
+      if (owned)
+        throw new Error("GroupHistoryTree: required checkpoint missing");
       return undefined;
     }
+    let tree: GroupHistoryTree | undefined;
+    try {
+      tree = await GroupHistoryTree.load(this.rewindStore, idHex);
+    } catch (error) {
+      throw new Error(
+        `GroupHistoryTree: failed to restore required history: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+    if (!tree) throw new Error("GroupHistoryTree: checkpoint disappeared");
+    const tipTag = bytesToHex(state.confirmationTag);
+    if (!tree.hasNode(tipTag)) {
+      if (metadata[0] === 1) {
+        log(
+          "discarding stale legacy history tree for %s (missing tip node)",
+          idHex,
+        );
+        return undefined;
+      }
+      throw new Error(
+        "GroupHistoryTree: canonical tip missing from checkpoint",
+      );
+    }
+    if (
+      bytesToHex(state.groupContext.groupId) !== idHex ||
+      tree.epochOf(tipTag) !== Number(state.groupContext.epoch)
+    )
+      throw new Error(
+        "GroupHistoryTree: canonical state disagrees with checkpoint",
+      );
+    // Complete exact-key materialization, deletion and acknowledgement before
+    // build/hydration can trigger callbacks or accept any public group work.
+    await tree.resumeRetentionCleanup();
+    return tree;
   }
 
   /**
    * Rebuilds the bounded convergence window from the tree's canonical path
-   * (root → the loaded tip), so fork recovery has the sync access it needs. Only
-   * the last `maxRewindCommits` epochs are materialized (the whole path when the
-   * horizon is infinite); `record` prunes anything older. Returns `undefined` if
-   * the path or any snapshot/commit is missing.
+   * (root → the loaded tip), so fork recovery has the sync access it needs.
+   * Membership already encodes finite bounds and exact pending-work pins. A
+   * second age cutoff here would erase pinned pristine exporters on restart.
    */
   async #retainedFromTree(
     tree: GroupHistoryTree,
@@ -258,13 +294,7 @@ export class GroupRegistry<
     const fullPath = tree.path(tipTag);
     if (!fullPath || fullPath.length === 0) return undefined;
 
-    const horizon =
-      this.convergencePolicy?.maxRewindCommits ??
-      DEFAULT_CONVERGENCE_POLICY.maxRewindCommits;
-    const keep = Number.isFinite(horizon)
-      ? Math.max(1, horizon + 1)
-      : fullPath.length;
-    const path = fullPath.slice(-keep);
+    const path = fullPath;
 
     const states: ClientState[] = [];
     for (const tag of path) {
@@ -327,7 +357,12 @@ export class GroupRegistry<
             ? group.profileSupport.proofReason
             : undefined,
         );
-      if (profileSupported && group.forkTree.tips().length > 1)
+      if (
+        profileSupported &&
+        (group.forkTree.tips().length > 1 ||
+          group.session.removalBlocked ||
+          group.session.removalEvidence)
+      )
         await group.reconverge();
       await group.realizeRemovalIfNeeded();
       await group.realizeDisbandIfNeeded();

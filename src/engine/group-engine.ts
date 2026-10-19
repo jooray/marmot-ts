@@ -1,4 +1,5 @@
 /** @module @category Engine */
+import { completeSettledRetentionOwner } from "./settled-retention-owner.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { Debugger } from "debug";
 import {
@@ -107,7 +108,11 @@ import {
   type AuditSink,
   type AuditTransportWireEnvelope,
 } from "../audit/index.js";
-import { framedContentType } from "./wire-format.js";
+import {
+  framedContentType,
+  framedEpoch,
+  framedCommitProposals,
+} from "./wire-format.js";
 import {
   validateGroupImageLegality,
   validateGroupImageProposals,
@@ -119,19 +124,32 @@ import {
   requiredComponentIdsOf,
   validatePreApplyProposals,
   withCapturedProposals,
+  resolveCapturedCommitLegality,
 } from "./admin-policy.js";
 import { DeliveredPayloadLedger } from "./delivered-payloads.js";
 import {
   type ChainLink,
   collectWitnessesAt,
   ForkRecovery,
+  buildRemovalBranchSet,
+  treeTipCommitter,
+  type RemovalAttribution,
+  type RemovalRecovery,
   resolveCandidateParent,
   type ForkResolution,
 } from "./fork-recovery.js";
 import { GroupHistoryTree } from "./history-tree.js";
+import type {
+  HistoryRetentionPin,
+  HistoryRetentionOptions,
+  HistoryRetentionPlan,
+} from "./retention.js";
+import { retentionFloor, projectHistoricalReceivers } from "./retention.js";
 import { buildTreeBranchSet, type TreeBranchSet } from "./tree-convergence.js";
 import { IngestionPool, type IngestionPoolOptions } from "./ingestion-pool.js";
 import { contentDedupId } from "./message-dedup.js";
+import { rejectPublicationPreparation } from "./publication-preparation.js";
+import { isAppPayloadExpired } from "../core/retained-history.js";
 import {
   deriveStateNotifications,
   groupWithdrawnNotificationsByCommit,
@@ -145,7 +163,10 @@ import {
   isAuthenticApplicationMessage,
 } from "./ingest.js";
 import { ingestResultDisposition } from "./ingest-disposition.js";
-import { RetainedHistoryStore } from "./retained-store.js";
+import {
+  RetainedHistoryStore,
+  type RetainedAppliedLink,
+} from "./retained-store.js";
 import type {
   CommitOrderingPriority,
   OwnCommitConvergenceStamp,
@@ -264,6 +285,11 @@ export type MarmotGroupEngineOptions<TEnvelope> = {
   ciphersuite: CiphersuiteImpl;
   peeler: GroupPeeler<TEnvelope>;
   onStateChanged?: (state: ClientState) => void;
+  /** Synchronous terminal fence before exposing the selected state to observers. */
+  onSelectedDisband?: (
+    evidence: DisbandCandidateEvidence,
+    state: ClientState,
+  ) => void;
   /**
    * The bounded convergence window (canonical states + applied commits within
    * the rollback horizon), derived from the history tree on load. When omitted
@@ -305,7 +331,7 @@ export type MarmotGroupEngineOptions<TEnvelope> = {
   scheduler?: ConvergenceScheduler;
   /**
    * Called once the quiescence window elapses after convergence-relevant input,
-   * so the owner can re-check {@link convergenceStatus} and release any queued
+   * so the owner can re-check {@link MarmotGroupEngine.convergenceStatus} and release any queued
    * outbound work (B5). The engine itself holds no outbound queue.
    */
   onSettleCheck?: () => void | Promise<void>;
@@ -336,6 +362,11 @@ export class MarmotGroupEngine<TEnvelope> {
   #state: ClientState;
   /** Group lifecycle state (group-state.md); only `Stable` may prepare a commit. */
   #lifecycle: GroupLifecycleState = groupLifecycleStates.stable;
+  /** Engine-mediated mutation history, including changes away and back. */
+  #mutationRevision = 0n;
+  #activeAdmissions = 0;
+  #retentionLease: { done: Promise<void>; release: () => void } | undefined;
+  readonly #pendingConfirmations = new Set<PendingState>();
   /**
    * Source (parent) epoch of a staged local commit awaiting publish
    * confirmation. Set on entering `PendingPublish`, cleared once the commit
@@ -344,7 +375,14 @@ export class MarmotGroupEngine<TEnvelope> {
    * state needed to apply the staged commit on confirmation (`retained-history.md`
    * "Pruning").
    */
-  #stagedCommitParentEpoch: number | undefined;
+  #stagedCommit:
+    | {
+        parentTag: string;
+        sourceEpoch: number;
+        childTag: string;
+        contentId: string;
+      }
+    | undefined;
 
   /** Retained canonical states + applied commits for fork recovery. */
   readonly #retained: RetainedHistoryStore;
@@ -372,16 +410,17 @@ export class MarmotGroupEngine<TEnvelope> {
    * state, so this primarily gives a clean `duplicate` disposition for re-wrapped
    * replays and stops a duplicate application message from re-delivering.
    */
-  readonly #seenContentIds = new Set<string>();
+  readonly #seenContentIds = new Map<string, number>();
   /**
    * Content ids of our own sends, so an echo re-wrapped in a fresh transport
    * envelope (new event id) is still recognized as our own (reference
    * `sent_message_ids`). The session also strips own echoes by outer event id
    * before ingest; this covers the re-wrapped case.
    */
-  readonly #sentContentIds = new Set<string>();
+  readonly #sentContentIds = new Map<string, number>();
 
   readonly #onStateChanged?: (state: ClientState) => void;
+  readonly #onSelectedDisband?: MarmotGroupEngineOptions<TEnvelope>["onSelectedDisband"];
 
   /** Injectable wall-clock for the convergence quiescence window (B5). */
   readonly #now: () => number;
@@ -431,6 +470,7 @@ export class MarmotGroupEngine<TEnvelope> {
     this.ciphersuite = options.ciphersuite;
     this.peeler = options.peeler;
     this.#onStateChanged = options.onStateChanged;
+    this.#onSelectedDisband = options.onSelectedDisband;
     this.#now = options.now ?? (() => performance.now());
     this.#wallNow = Date.now;
     this.#settlementQuiescenceMs =
@@ -472,6 +512,281 @@ export class MarmotGroupEngine<TEnvelope> {
   /** Number of undecryptable events currently held in the ingestion pool. */
   get pendingCount(): number {
     return this.#pool.size + this.#capacityRefusedInput.size;
+  }
+
+  /** @internal Fence engine-mediated mutation through durable retention cleanup. */
+  async retainSettled(
+    operation: (
+      capture: Readonly<HistoryRetentionOptions & { revision: bigint }>,
+      publish: (plan: HistoryRetentionPlan) => Promise<void>,
+    ) => Promise<HistoryRetentionPlan> = async (capture, publish) => {
+      await this.#tree.flush();
+      const plan = await this.#tree.prepareRetention(capture);
+      await publish(plan);
+      return plan;
+    },
+    dependencies: {
+      pins?: readonly HistoryRetentionPin[];
+      contentIds?: readonly string[];
+      unresolvedDependency?: boolean;
+    } = {},
+  ): Promise<
+    | { kind: "committed"; floorEpoch: number }
+    | { kind: "postponed"; reason: string }
+  > {
+    await this.#disbandHydrated;
+    if (
+      this.#retentionLease ||
+      this.#activeAdmissions ||
+      this.convergenceStatus !== convergenceStatuses.settled ||
+      this.#convergencePass ||
+      this.#lifecycle !== groupLifecycleStates.stable ||
+      this.#pendingConfirmations.size ||
+      this.#stagedCommit !== undefined ||
+      this.#disbandCandidates.size ||
+      this.#selectedDisbandEvidence ||
+      this.#disbandRequest?.status === "pending" ||
+      this.#retainedPassInput.length ||
+      this.#capacityRefusedInput.size
+    )
+      return { kind: "postponed", reason: "active-dependencies" };
+    let release!: () => void;
+    const lease = {
+      done: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+      release: () => release(),
+    };
+    this.#retentionLease = lease;
+    try {
+      const pinnedContentIds = Object.freeze([
+        ...(dependencies.contentIds ?? []),
+      ]);
+      const tipEpoch = Number(this.#state.groupContext.epoch);
+      let floorEpoch: number;
+      try {
+        floorEpoch = retentionFloor(tipEpoch, this.#policy.maxRewindCommits);
+        retentionFloor(tipEpoch, this.#policy.appPayloadPastEpochLimit);
+      } catch {
+        return { kind: "postponed", reason: "unsafe-epoch" };
+      }
+      const pins: HistoryRetentionPin[] = (dependencies.pins ?? []).map(
+        (pin) => ({ ...pin }),
+      );
+      if (dependencies.unresolvedDependency)
+        return { kind: "postponed", reason: "unresolved-dependency" };
+      // Stale authenticated parents are conclusively outside the supported window.
+      this.#pool.evictStale(tipEpoch);
+      for (const entry of this.#pool.entries()) {
+        if (entry.sourceEpoch === undefined)
+          return { kind: "postponed", reason: "unknown-input-epoch" };
+        const candidates = this.#tree
+          .tags()
+          .filter((tag) => this.#tree.epochOf(tag) === entry.sourceEpoch);
+        if (entry.stateTag && this.#tree.hasNode(entry.stateTag))
+          candidates.push(entry.stateTag);
+        if (!candidates.length)
+          return { kind: "postponed", reason: "missing-input-parent" };
+        for (const stateTag of new Set(candidates)) {
+          const state = await this.#tree.stateAt(stateTag);
+          if (!state)
+            return { kind: "postponed", reason: "missing-input-parent" };
+          if (
+            entry.message &&
+            framedContentType(entry.message) === contentTypes.application
+          ) {
+            if (
+              entry.sourceEpoch >=
+              retentionFloor(tipEpoch, this.#policy.appPayloadPastEpochLimit)
+            )
+              pins.push({
+                stateTag,
+                reason: "application",
+                receiverEpoch: entry.sourceEpoch,
+              });
+          } else pins.push({ stateTag, reason: "recovery" });
+          if (entry.message)
+            pins.push(...this.#receiverPins(state, entry.message));
+        }
+      }
+      for (const entry of this.#delivered.exportInvalidated())
+        pins.push({ stateTag: entry.stateTag, reason: "retraction" });
+      pins.push(...this.#receiverPins(this.#state));
+      for (const pin of pins) {
+        if (!this.#tree.hasNode(pin.stateTag))
+          return { kind: "postponed", reason: "missing-pinned-state" };
+        if (
+          pin.receiverEpoch !== undefined &&
+          (!Number.isSafeInteger(pin.receiverEpoch) || pin.receiverEpoch < 0)
+        )
+          return { kind: "postponed", reason: "unsafe-receiver-epoch" };
+      }
+      const capture = Object.freeze({
+        revision: this.#mutationRevision,
+        canonicalTipTag: bytesToHex(this.#state.confirmationTag),
+        maxRewindCommits: this.#policy.maxRewindCommits,
+        appPayloadPastEpochLimit: this.#policy.appPayloadPastEpochLimit,
+        pins: Object.freeze(pins.map((pin) => Object.freeze(pin))),
+      });
+      let durablePlan: HistoryRetentionPlan | undefined;
+      const plan = await operation(capture, async (candidate) => {
+        if (
+          candidate.canonicalTipTag !== capture.canonicalTipTag ||
+          candidate.floorEpoch !== floorEpoch ||
+          candidate.tipEpoch !== tipEpoch ||
+          candidate.appFloorEpoch !==
+            retentionFloor(tipEpoch, capture.appPayloadPastEpochLimit)
+        )
+          throw new Error("Retention checkpoint differs from settled capture");
+        for (const pin of capture.pins) {
+          if (!candidate.retainedTags.includes(pin.stateTag))
+            throw new Error("Retention checkpoint omitted an exact pin");
+          const receivers = candidate.receiverEpochs.get(pin.stateTag);
+          if (pin.unresolvedReceiverDependency && receivers !== undefined)
+            throw new Error(
+              "Retention checkpoint projected an unresolved receiver dependency",
+            );
+          if (
+            pin.receiverEpoch !== undefined &&
+            pin.receiverEpoch !== this.#tree.epochOf(pin.stateTag) &&
+            !deserializeClientState(
+              candidate.snapshots.get(pin.stateTag)!,
+            ).historicalReceiverData.has(BigInt(pin.receiverEpoch))
+          )
+            throw new Error(
+              "Retention checkpoint omitted an exact receiver pin",
+            );
+        }
+        try {
+          await this.#tree.publishRetention(candidate);
+        } finally {
+          if (this.#tree.isRetentionPublished(candidate)) {
+            this.#commitRetentionProjection(
+              candidate,
+              capture.pins,
+              pinnedContentIds,
+            );
+            durablePlan = candidate;
+          }
+        }
+      });
+      if (plan !== durablePlan || !this.#tree.isRetentionPublished(plan))
+        throw new Error("Retention callback did not publish its checkpoint");
+      await this.#tree.resumeRetentionCleanup();
+      return { kind: "committed", floorEpoch: plan.floorEpoch };
+    } finally {
+      if (this.#retentionLease === lease) this.#retentionLease = undefined;
+      lease.release();
+    }
+  }
+
+  #commitRetentionProjection(
+    plan: HistoryRetentionPlan,
+    pins: readonly HistoryRetentionPin[],
+    contentIds: readonly string[] = [],
+  ): void {
+    // Preserve live ratchet generations instead of restoring a pristine tree snapshot.
+    const projectedState = deserializeClientState(
+      projectHistoricalReceivers(
+        serializeClientState(this.#state),
+        plan.appFloorEpoch,
+        pins.filter((pin) => pin.stateTag === plan.canonicalTipTag),
+      ).snapshot,
+    );
+    this.#retained.commitRetention(plan);
+    this.#delivered.commitRetention(plan.retainedTags);
+    this.#pool.commitRetention(plan.retainedTags);
+    this.#state = projectedState;
+    if (this.#policy.maxRewindCommits !== Infinity) {
+      const pinned = new Set(contentIds);
+      if (this.#stagedCommit) pinned.add(this.#stagedCommit.contentId);
+      for (const entry of this.#delivered.exportInvalidated())
+        pinned.add(contentDedupId(entry.message));
+      for (const identities of [this.#sentContentIds, this.#seenContentIds])
+        for (const [id, epoch] of identities)
+          if (epoch < plan.floorEpoch && !pinned.has(id)) identities.delete(id);
+    }
+    this.#mutationRevision++;
+  }
+
+  /** @internal Observable retention pressure, including unfinished exact pins. */
+  retentionIdentityCounts(): Readonly<{ sent: number; seen: number }> {
+    return { sent: this.#sentContentIds.size, seen: this.#seenContentIds.size };
+  }
+
+  #rememberSent(message: MlsMessage): void {
+    const epoch = framedEpoch(message);
+    if (
+      epoch === undefined ||
+      !Number.isSafeInteger(Number(epoch)) ||
+      epoch < 0n
+    )
+      throw new Error("Local MLS message has an unsafe source epoch");
+    this.#sentContentIds.set(contentDedupId(message), Number(epoch));
+  }
+
+  #rememberSeen(message: MlsMessage): void {
+    const epoch = framedEpoch(message);
+    if (
+      epoch !== undefined &&
+      Number.isSafeInteger(Number(epoch)) &&
+      epoch >= 0n
+    )
+      this.#seenContentIds.set(contentDedupId(message), Number(epoch));
+  }
+
+  #receiverPins(
+    state: ClientState,
+    message?: MlsMessage,
+  ): HistoryRetentionPin[] {
+    const stateTag = bytesToHex(state.confirmationTag);
+    let proposals: Proposal[] | undefined = Object.values(
+      state.unappliedProposals,
+    ).map((entry) => entry.proposal);
+    if (message && framedContentType(message) === contentTypes.commit)
+      proposals = framedCommitProposals(message, state);
+    else if (
+      message?.wireformat === wireformats.mls_public_message &&
+      message.publicMessage.content.contentType === contentTypes.proposal
+    )
+      proposals = [message.publicMessage.content.proposal];
+    if (!proposals)
+      return [
+        { stateTag, reason: "resumption", unresolvedReceiverDependency: true },
+      ];
+    return proposals.flatMap((proposal) => {
+      if (
+        proposal.proposalType !== defaultProposalTypes.psk ||
+        !("psk" in proposal)
+      )
+        return [];
+      const psk = proposal.psk.preSharedKeyId;
+      if (
+        !("pskEpoch" in psk) ||
+        bytesToHex(psk.pskGroupId) !== bytesToHex(state.groupContext.groupId)
+      )
+        return [];
+      return [
+        {
+          stateTag,
+          reason: "resumption" as const,
+          receiverEpoch: Number(psk.pskEpoch),
+        },
+      ];
+    });
+  }
+
+  async #enterAdmission(): Promise<() => void> {
+    while (this.#retentionLease) await this.#retentionLease.done;
+    this.#activeAdmissions++;
+    return () => {
+      this.#activeAdmissions--;
+    };
+  }
+
+  #assertMutationAllowed(): void {
+    if (this.#retentionLease)
+      throw new Error("Engine mutation refused during retention");
   }
 
   /**
@@ -578,9 +893,9 @@ export class MarmotGroupEngine<TEnvelope> {
   #pinnedEpochs(): number[] {
     return [
       ...this.#pool.sourceEpochs(),
-      ...(this.#stagedCommitParentEpoch === undefined
+      ...(this.#stagedCommit === undefined
         ? []
-        : [this.#stagedCommitParentEpoch]),
+        : [this.#stagedCommit.sourceEpoch]),
     ];
   }
 
@@ -650,6 +965,7 @@ export class MarmotGroupEngine<TEnvelope> {
 
   /** Permanently close plaintext delivery bookkeeping on local destruction. */
   destroyDeliveredPayloads(): void {
+    this.#assertMutationAllowed();
     this.#delivered.destroy();
   }
 
@@ -663,12 +979,14 @@ export class MarmotGroupEngine<TEnvelope> {
       import("./delivered-payloads.js").DeliveredAppPayload<TEnvelope>
     >,
   ): void {
+    this.#assertMutationAllowed();
     this.#delivered.acknowledgeInvalidated(entries);
   }
 
   importDeliveredPayloads(
     entries: import("./delivered-payloads.js").DeliveredAppPayload<TEnvelope>[],
   ): void {
+    this.#assertMutationAllowed();
     this.#delivered.importEntries(entries);
     const horizon = this.#ledgerHorizon();
     if (horizon !== undefined) this.#delivered.pruneBelow(horizon);
@@ -709,6 +1027,7 @@ export class MarmotGroupEngine<TEnvelope> {
 
   /** Opens or refreshes the current collection pass from the monotonic clock. */
   admitConvergencePass(): ConvergencePassState {
+    this.#assertMutationAllowed();
     const nowMs = this.#now();
     this.#convergencePass = this.#convergencePass
       ? refreshConvergencePass(this.#convergencePass, nowMs)
@@ -729,194 +1048,210 @@ export class MarmotGroupEngine<TEnvelope> {
 
   /** Flushes restart-critical terminal candidate/pass evidence. */
   async persistDisbandConvergence(): Promise<void> {
-    await this.#disbandHydrated;
-    if (!this.#lifecycleStore) return;
-    const key = disbandConvergenceKey(
-      bytesToHex(this.#state.groupContext.groupId),
-    );
-    if (!this.#convergencePass || this.#disbandCandidates.size === 0) {
-      await this.#lifecycleStore.removeItem(key);
-      return;
+    const leaveAdmission = await this.#enterAdmission();
+    try {
+      await this.#disbandHydrated;
+      if (!this.#lifecycleStore) return;
+      const key = disbandConvergenceKey(
+        bytesToHex(this.#state.groupContext.groupId),
+      );
+      if (!this.#convergencePass || this.#disbandCandidates.size === 0) {
+        await this.#lifecycleStore.removeItem(key);
+        return;
+      }
+      const wallNow = this.#wallNow();
+      const monoNow = this.#now();
+      await this.#lifecycleStore.setItem(
+        key,
+        encodeDisbandConvergence({
+          generation: this.#convergencePass.generation,
+          baseEpoch: this.#convergencePass.baseEpoch,
+          openedAtWallMs: this.#passOpenedWallMs ?? wallNow,
+          deadlineWallMs:
+            wallNow + (this.#convergencePass.deadlineMs - monoNow),
+          lastRelevantInputWallMs:
+            wallNow + (this.#convergencePass.lastRelevantInputMs - monoNow),
+          candidates: [...this.#disbandCandidates.values()].map(
+            ({ evidence, resultingState, message }) => ({
+              commitDigest: bytesToHex(evidence.commitDigest),
+              actorPubkey: evidence.actorPubkey,
+              sourceEpoch: evidence.sourceEpoch,
+              parentTag: evidence.parentTag,
+              childTag: bytesToHex(resultingState.confirmationTag),
+              commitMessage: bytesToHex(encode(mlsMessageEncoder, message)),
+              resultingState: bytesToHex(serializeClientState(resultingState)),
+            }),
+          ),
+        }),
+      );
+    } finally {
+      leaveAdmission();
     }
-    const wallNow = this.#wallNow();
-    const monoNow = this.#now();
-    await this.#lifecycleStore.setItem(
-      key,
-      encodeDisbandConvergence({
-        generation: this.#convergencePass.generation,
-        baseEpoch: this.#convergencePass.baseEpoch,
-        openedAtWallMs: this.#passOpenedWallMs ?? wallNow,
-        deadlineWallMs: wallNow + (this.#convergencePass.deadlineMs - monoNow),
-        lastRelevantInputWallMs:
-          wallNow + (this.#convergencePass.lastRelevantInputMs - monoNow),
-        candidates: [...this.#disbandCandidates.values()].map(
-          ({ evidence, resultingState, message }) => ({
-            commitDigest: bytesToHex(evidence.commitDigest),
-            actorPubkey: evidence.actorPubkey,
-            sourceEpoch: evidence.sourceEpoch,
-            parentTag: evidence.parentTag,
-            childTag: bytesToHex(resultingState.confirmationTag),
-            commitMessage: bytesToHex(encode(mlsMessageEncoder, message)),
-            resultingState: bytesToHex(serializeClientState(resultingState)),
-          }),
-        ),
-      }),
-    );
   }
 
   /** Persist irreversible intent, then prepare its exact candidate against this epoch. */
   async requestDisband(): Promise<SendResult<TEnvelope> | undefined> {
-    await this.#disbandHydrated;
-    // CR-04/D-11: refuse BEFORE any durable side effect — this method persists
-    // an irreversible pending disband request before it prepares a candidate,
-    // so checking only at #sendInner would leave a group outside the current
-    // profile with a persisted intent it can never publish.
-    //
-    // Only the profile half: the removedFromGroup case is answered a few lines
-    // below by durably failing the request (`NoLongerMember`) and returning
-    // `undefined`, which is this seam's deliberate disposition and must not be
-    // converted into a throw.
-    this.#assertOutboundProfileSupported();
-    if (!this.#lifecycleStore)
-      throw new Error(
-        "A durable lifecycleStore is required to request disbanding",
+    const leaveAdmission = await this.#enterAdmission();
+    try {
+      await this.#disbandHydrated;
+      // CR-04/D-11: refuse BEFORE any durable side effect — this method persists
+      // an irreversible pending disband request before it prepares a candidate,
+      // so checking only at #sendInner would leave a group outside the current
+      // profile with a persisted intent it can never publish.
+      //
+      // Only the profile half: the removedFromGroup case is answered a few lines
+      // below by durably failing the request (`NoLongerMember`) and returning
+      // `undefined`, which is this seam's deliberate disposition and must not be
+      // converted into a throw.
+      this.#assertOutboundProfileSupported();
+      if (!this.#lifecycleStore)
+        throw new Error(
+          "A durable lifecycleStore is required to request disbanding",
+        );
+      if (this.#state.groupActiveState.kind === "removedFromGroup") {
+        await this.#failDisbandRequest("NoLongerMember");
+        return undefined;
+      }
+      const groupData = getMarmotGroupView(this.#state);
+      const actorLeafIndex = Number(this.#state.privatePath.leafIndex);
+      const actorPubkey = getCredentialPubkey(
+        getCredentialFromLeafIndex(
+          this.#state.ratchetTree,
+          this.#state.privatePath.leafIndex as LeafIndex,
+        ),
       );
-    if (this.#state.groupActiveState.kind === "removedFromGroup") {
-      await this.#failDisbandRequest("NoLongerMember");
-      return undefined;
-    }
-    const groupData = getMarmotGroupView(this.#state);
-    const actorLeafIndex = Number(this.#state.privatePath.leafIndex);
-    const actorPubkey = getCredentialPubkey(
-      getCredentialFromLeafIndex(
-        this.#state.ratchetTree,
-        this.#state.privatePath.leafIndex as LeafIndex,
-      ),
-    );
-    if (!groupData?.adminPubkeys.includes(actorPubkey)) {
-      await this.#failDisbandRequest("NoLongerAdmin");
-      return undefined;
-    }
-    if (
-      getGroupLifecycle(this.#state.groupContext.extensions) !== "active" ||
-      !(getAppComponents(this.#state.groupContext.extensions) ?? []).includes(
-        GROUP_LIFECYCLE_COMPONENT_ID,
+      if (!groupData?.adminPubkeys.includes(actorPubkey)) {
+        await this.#failDisbandRequest("NoLongerAdmin");
+        return undefined;
+      }
+      if (
+        getGroupLifecycle(this.#state.groupContext.extensions) !== "active" ||
+        !(getAppComponents(this.#state.groupContext.extensions) ?? []).includes(
+          GROUP_LIFECYCLE_COMPONENT_ID,
+        )
       )
-    )
-      throw new Error("Group disbanding is not enabled");
+        throw new Error("Group disbanding is not enabled");
 
-    const epoch = Number(this.#state.groupContext.epoch);
-    if (!this.#disbandRequest) {
+      const epoch = Number(this.#state.groupContext.epoch);
+      if (!this.#disbandRequest) {
+        this.#disbandRequest = {
+          status: "pending",
+          requestedAtMs: Date.now(),
+          lastPreparedEpoch: null,
+        };
+        await this.#persistDisbandRequest();
+      }
+      if (this.#disbandRequest.status === "failed") return undefined;
+      if (
+        this.#disbandRequest.lastPreparedEpoch === epoch &&
+        this.#lifecycle !== groupLifecycleStates.stable
+      )
+        return undefined;
       this.#disbandRequest = {
-        status: "pending",
-        requestedAtMs: Date.now(),
-        lastPreparedEpoch: null,
+        ...this.#disbandRequest,
+        lastPreparedEpoch: epoch,
       };
       await this.#persistDisbandRequest();
-    }
-    if (this.#disbandRequest.status === "failed") return undefined;
-    if (
-      this.#disbandRequest.lastPreparedEpoch === epoch &&
-      this.#lifecycle !== groupLifecycleStates.stable
-    )
-      return undefined;
-    this.#disbandRequest = {
-      ...this.#disbandRequest,
-      lastPreparedEpoch: epoch,
-    };
-    await this.#persistDisbandRequest();
 
-    const proposals: Proposal[] = this.#occupiedLeafIndices()
-      .filter((index) => index !== actorLeafIndex)
-      .map((removed) => ({
-        proposalType: defaultProposalTypes.remove,
-        remove: { removed },
-      }));
-    proposals.push(
-      {
-        proposalType: appDataUpdateProposalType,
-        appDataUpdate: {
-          componentId: GROUP_LIFECYCLE_COMPONENT_ID,
-          operation: "update",
-          update: encodeGroupLifecycleV1("disbanded"),
+      const proposals: Proposal[] = this.#occupiedLeafIndices()
+        .filter((index) => index !== actorLeafIndex)
+        .map((removed) => ({
+          proposalType: defaultProposalTypes.remove,
+          remove: { removed },
+        }));
+      proposals.push(
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: GROUP_LIFECYCLE_COMPONENT_ID,
+            operation: "update",
+            update: encodeGroupLifecycleV1("disbanded"),
+          },
         },
-      },
-      {
-        proposalType: appDataUpdateProposalType,
-        appDataUpdate: {
-          componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
-          operation: "update",
-          update: encodeAdminPolicyV1([actorPubkey]),
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
+            operation: "update",
+            update: encodeAdminPolicyV1([actorPubkey]),
+          },
         },
-      },
-    );
-    const result = await this.#sendInner({
-      kind: "commit",
-      actorPubkey,
-      extraProposals: proposals,
-    });
-    if (result.kind !== "groupEvolution" || !result.pending.commitMessage)
-      throw new Error("Disband request did not produce a commit");
-    result.pending.terminalEvidence = {
-      commitDigest: commitDigest(
-        encode(mlsMessageEncoder, result.pending.commitMessage),
-      ),
-      actorPubkey,
-      sourceEpoch: epoch,
-      parentTag: bytesToHex(this.#state.confirmationTag),
-      terminalOutcome: "disbanded",
-    };
-    return result;
+      );
+      const result = await this.#sendInner({
+        kind: "commit",
+        actorPubkey,
+        extraProposals: proposals,
+      });
+      if (result.kind !== "groupEvolution" || !result.pending.commitMessage)
+        throw new Error("Disband request did not produce a commit");
+      result.pending.terminalEvidence = {
+        commitDigest: commitDigest(
+          encode(mlsMessageEncoder, result.pending.commitMessage),
+        ),
+        actorPubkey,
+        sourceEpoch: epoch,
+        parentTag: bytesToHex(this.#state.confirmationTag),
+        terminalOutcome: "disbanded",
+      };
+      return result;
+    } finally {
+      leaveAdmission();
+    }
   }
 
   /** Atomically enables lifecycle-v1 for a legacy group when every leaf supports it. */
   async enableGroupDisbanding(): Promise<SendResult<TEnvelope> | undefined> {
-    await this.#disbandHydrated;
-    // CR-04: this seam had NO removed-from-group refusal at all, and no
-    // profile refusal, because it reaches #sendInner directly.
-    this.#assertOutboundIntentAllowed();
-    const required =
-      getAppComponents(this.#state.groupContext.extensions) ?? [];
-    const lifecycle = getGroupLifecycle(this.#state.groupContext.extensions);
-    if (required.includes(GROUP_LIFECYCLE_COMPONENT_ID)) {
-      if (lifecycle === "active") return undefined;
-      throw new Error("Lifecycle component is required but not active");
+    const leaveAdmission = await this.#enterAdmission();
+    try {
+      await this.#disbandHydrated;
+      // CR-04: this seam had NO removed-from-group refusal at all, and no
+      // profile refusal, because it reaches #sendInner directly.
+      this.#assertOutboundIntentAllowed();
+      const required =
+        getAppComponents(this.#state.groupContext.extensions) ?? [];
+      const lifecycle = getGroupLifecycle(this.#state.groupContext.extensions);
+      if (required.includes(GROUP_LIFECYCLE_COMPONENT_ID)) {
+        if (lifecycle === "active") return undefined;
+        throw new Error("Lifecycle component is required but not active");
+      }
+      const actorPubkey = getCredentialPubkey(
+        getCredentialFromLeafIndex(
+          this.#state.ratchetTree,
+          this.#state.privatePath.leafIndex as LeafIndex,
+        ),
+      );
+      const groupData = getMarmotGroupView(this.#state);
+      if (!groupData?.adminPubkeys.includes(actorPubkey))
+        throw new Error("Only an active group admin may enable disbanding");
+      const proposals: Proposal[] = [
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: APP_COMPONENTS_COMPONENT_ID,
+            operation: "update",
+            update: encodeComponentsList([
+              ...required,
+              GROUP_LIFECYCLE_COMPONENT_ID,
+            ]),
+          },
+        },
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: GROUP_LIFECYCLE_COMPONENT_ID,
+            operation: "update",
+            update: encodeGroupLifecycleV1("active"),
+          },
+        },
+      ];
+      return await this.#sendInner({
+        kind: "commit",
+        actorPubkey,
+        extraProposals: proposals,
+      });
+    } finally {
+      leaveAdmission();
     }
-    const actorPubkey = getCredentialPubkey(
-      getCredentialFromLeafIndex(
-        this.#state.ratchetTree,
-        this.#state.privatePath.leafIndex as LeafIndex,
-      ),
-    );
-    const groupData = getMarmotGroupView(this.#state);
-    if (!groupData?.adminPubkeys.includes(actorPubkey))
-      throw new Error("Only an active group admin may enable disbanding");
-    const proposals: Proposal[] = [
-      {
-        proposalType: appDataUpdateProposalType,
-        appDataUpdate: {
-          componentId: APP_COMPONENTS_COMPONENT_ID,
-          operation: "update",
-          update: encodeComponentsList([
-            ...required,
-            GROUP_LIFECYCLE_COMPONENT_ID,
-          ]),
-        },
-      },
-      {
-        proposalType: appDataUpdateProposalType,
-        appDataUpdate: {
-          componentId: GROUP_LIFECYCLE_COMPONENT_ID,
-          operation: "update",
-          update: encodeGroupLifecycleV1("active"),
-        },
-      },
-    ];
-    return this.#sendInner({
-      kind: "commit",
-      actorPubkey,
-      extraProposals: proposals,
-    });
   }
 
   /**
@@ -972,54 +1307,90 @@ export class MarmotGroupEngine<TEnvelope> {
     /** Ephemeral caller fence; checked after fallible commit preparation, never stored in state. */
     assertPreparation?: (proposals: readonly Proposal[]) => void,
   ): Promise<SendResult<TEnvelope>> {
-    await this.#disbandHydrated;
-    assertPreparation?.([]);
-    if (this.#disbandRequest?.status === "pending") throw new DisbandingError();
-    // Refused before the audit `send_entry` emit, so a refused intent leaves
-    // no trace of having been attempted.
-    this.#assertOutboundIntentAllowed();
-    const intentKind = auditSendIntentKind(intent);
-    this.#emitAudit({ type: "send_entry", intent_kind: intentKind });
+    const leaveAdmission = await this.#enterAdmission();
     try {
-      const result = await this.#sendInner(intent, assertPreparation);
-      this.#emitAudit({
-        type: "send_outcome",
-        intent_kind: intentKind,
-        result_kind: auditSendResultKind(result),
-        // FOUND-01: `foundingGroupCreated` carries no `envelope` — no
-        // transport artifact was ever constructed for it (see the
-        // `SendResult` doc comment in types.ts). An empty `outbound_messages`
-        // list is therefore the honest audit record here; synthesizing a
-        // fabricated envelope reference would be dishonest (T-10-04) and
-        // `#transportEnvelope(undefined)` would throw at runtime (T-10-05).
-        outbound_messages:
-          result.kind === "foundingGroupCreated"
-            ? []
-            : [
-                {
-                  msg_id: this.peeler.idOf(result.envelope),
-                  artifact_kind: this.#artifactKind(
-                    result.envelope,
-                    result.kind,
-                  ),
-                  transport: this.#transportEnvelope(result.envelope),
-                },
-              ],
-      });
-      return result;
-    } catch (error) {
-      this.#emitAudit({
-        type: "send_error",
-        intent_kind: intentKind,
-        error_kind: "engine_error",
-        detail: errorDetail(error),
-      });
-      throw error;
+      await this.#disbandHydrated;
+      assertPreparation?.([]);
+      if (this.#disbandRequest?.status === "pending")
+        throw new DisbandingError();
+      // Refused before the audit `send_entry` emit, so a refused intent leaves
+      // no trace of having been attempted.
+      this.#assertOutboundIntentAllowed();
+      const intentKind = auditSendIntentKind(intent);
+      this.#emitAudit({ type: "send_entry", intent_kind: intentKind });
+      try {
+        const result = await this.#sendInner(intent, assertPreparation);
+        this.#emitAudit({
+          type: "send_outcome",
+          intent_kind: intentKind,
+          result_kind: auditSendResultKind(result),
+          // FOUND-01: `foundingGroupCreated` carries no `envelope` — no
+          // transport artifact was ever constructed for it (see the
+          // `SendResult` doc comment in types.ts). An empty `outbound_messages`
+          // list is therefore the honest audit record here; synthesizing a
+          // fabricated envelope reference would be dishonest (T-10-04) and
+          // `#transportEnvelope(undefined)` would throw at runtime (T-10-05).
+          outbound_messages:
+            result.kind === "foundingGroupCreated"
+              ? []
+              : [
+                  {
+                    msg_id: this.peeler.idOf(result.envelope),
+                    artifact_kind: this.#artifactKind(
+                      result.envelope,
+                      result.kind,
+                    ),
+                    transport: this.#transportEnvelope(result.envelope),
+                  },
+                ],
+        });
+        return result;
+      } catch (error) {
+        this.#emitAudit({
+          type: "send_error",
+          intent_kind: intentKind,
+          error_kind: "engine_error",
+          detail: errorDetail(error),
+        });
+        throw error;
+      }
+    } finally {
+      leaveAdmission();
     }
   }
 
   async #sendInner(
     intent: SendIntent,
+    assertPreparation?: (proposals: readonly Proposal[]) => void,
+  ): Promise<SendResult<TEnvelope>> {
+    // This scope belongs to one invocation, including disband/enablement. A
+    // post-wrap fence may reject without returning any caller-owned handle.
+    const preparedIds: string[] = [];
+    try {
+      const result = await this.#prepareSend(
+        intent,
+        async (message, state, metadata) => {
+          const envelope = await this.peeler.wrapGroupMessage(
+            message,
+            state,
+            metadata,
+          );
+          preparedIds.push(this.peeler.idOf(envelope));
+          return envelope;
+        },
+        assertPreparation,
+      );
+      if ("pending" in result) this.#pendingConfirmations.add(result.pending);
+      return result;
+    } catch (error) {
+      rejectPublicationPreparation(this, preparedIds);
+      throw error;
+    }
+  }
+
+  async #prepareSend(
+    intent: SendIntent,
+    wrap: GroupPeeler<TEnvelope>["wrapGroupMessage"],
     assertPreparation?: (proposals: readonly Proposal[]) => void,
   ): Promise<SendResult<TEnvelope>> {
     // CR-04: every outbound intent funnels through here — `send()`,
@@ -1062,13 +1433,12 @@ export class MarmotGroupEngine<TEnvelope> {
           message: intent.payload,
         });
 
-        const envelope = await this.peeler.wrapGroupMessage(
-          message,
-          sourceState,
-          { expiration },
-        );
-        this.#sentContentIds.add(contentDedupId(message));
+        this.#rememberSent(message);
+        // Consume the sender generation before fallible wrapping. A later
+        // epoch advance must never be overwritten when this await completes,
+        // and failed wrapping must not make a generation reusable.
         this.#setState(newState);
+        const envelope = await wrap(message, sourceState, { expiration });
         this.#delivered.record({
           epoch: Number(newState.groupContext.epoch),
           stateTag: bytesToHex(newState.confirmationTag),
@@ -1169,11 +1539,8 @@ export class MarmotGroupEngine<TEnvelope> {
           wireAsPublicMessage: true,
         });
 
-        const envelope = await this.peeler.wrapGroupMessage(
-          message,
-          this.state,
-        );
-        this.#sentContentIds.add(contentDedupId(message));
+        this.#rememberSent(message);
+        const envelope = await wrap(message, this.state);
         return {
           kind: "proposal",
           envelope,
@@ -1270,7 +1637,8 @@ export class MarmotGroupEngine<TEnvelope> {
           Number(parentState.privatePath.leafIndex),
         );
 
-        const envelope = await this.peeler.wrapGroupMessage(commit, this.state);
+        this.#rememberSent(commit);
+        const envelope = await wrap(commit, this.state);
         assertPreparation?.(guardedProposals);
 
         this.#transitionLifecycle(
@@ -1278,8 +1646,12 @@ export class MarmotGroupEngine<TEnvelope> {
           "begin_pending",
           "commit",
         );
-        this.#stagedCommitParentEpoch = Number(parentState.groupContext.epoch);
-        this.#sentContentIds.add(contentDedupId(commit));
+        this.#stagedCommit = {
+          parentTag: bytesToHex(parentState.confirmationTag),
+          sourceEpoch: Number(parentState.groupContext.epoch),
+          childTag: bytesToHex(newState.confirmationTag),
+          contentId: contentDedupId(commit),
+        };
 
         return {
           kind: "groupEvolution",
@@ -1306,7 +1678,10 @@ export class MarmotGroupEngine<TEnvelope> {
         // hand `pending` straight to `confirmPublished()` in the same
         // uninterrupted continuation, with no intervening `await` — that
         // invariant is convention, not enforced by this method (R-01).
-        const groupData = getMarmotGroupView(this.state);
+        const parentState = this.state;
+        const parentLifecycle = this.#lifecycle;
+        const parentRevision = this.#mutationRevision;
+        const groupData = getMarmotGroupView(parentState);
         if (!groupData) {
           throw new Error("MarmotGroupData not found in ClientState.");
         }
@@ -1333,22 +1708,22 @@ export class MarmotGroupEngine<TEnvelope> {
         // `#stagedCommitParentEpoch` pin -- invoked on a live group past
         // epoch 0, this is exactly the public-surface silent-fork hazard
         // CR-03 closes.
-        if (this.state.groupContext.epoch !== 0n) {
+        if (parentState.groupContext.epoch !== 0n) {
           throw new Error(
-            `foundingAdd: only legal at epoch 0 (the founding-creation exception); group is at epoch ${this.state.groupContext.epoch}`,
+            `foundingAdd: only legal at epoch 0 (the founding-creation exception); group is at epoch ${parentState.groupContext.epoch}`,
           );
         }
-        const occupiedLeaves = this.#occupiedLeafIndices();
+        const occupiedLeaves = this.#occupiedLeafIndices(parentState);
         if (
           occupiedLeaves.length !== 1 ||
-          occupiedLeaves[0] !== Number(this.state.privatePath.leafIndex)
+          occupiedLeaves[0] !== Number(parentState.privatePath.leafIndex)
         ) {
           throw new Error(
             `foundingAdd: requires a one-member group whose sole leaf is the local member; tree has ${occupiedLeaves.length} occupied leaves`,
           );
         }
         const unappliedCount = Object.keys(
-          this.state.unappliedProposals,
+          parentState.unappliedProposals,
         ).length;
         if (unappliedCount > 0) {
           throw new Error(
@@ -1357,7 +1732,7 @@ export class MarmotGroupEngine<TEnvelope> {
         }
 
         const context: ProposalContext = {
-          state: this.state,
+          state: parentState,
           ciphersuite: this.ciphersuite,
           groupData,
         };
@@ -1365,6 +1740,12 @@ export class MarmotGroupEngine<TEnvelope> {
         const newProposals = await this.#resolveCommitProposals(
           intent.extraProposals,
           context,
+        );
+
+        this.#assertFoundingPreparation(
+          parentState,
+          parentLifecycle,
+          parentRevision,
         );
 
         // No `proposalRefs` handling here: the intent has no such field, and
@@ -1392,7 +1773,7 @@ export class MarmotGroupEngine<TEnvelope> {
         }
 
         const prepared = this.#prepareOutboundCommitProposals(
-          this.state,
+          parentState,
           groupData.adminPubkeys,
           newProposals,
         );
@@ -1407,7 +1788,6 @@ export class MarmotGroupEngine<TEnvelope> {
           commitOptions.extraProposals = prepared.extraProposals;
         }
 
-        const parentState = this.state;
         const { commit, newState, welcome } = await createCommit({
           context: {
             cipherSuite: this.ciphersuite,
@@ -1417,6 +1797,12 @@ export class MarmotGroupEngine<TEnvelope> {
           state: prepared.commitState,
           ...commitOptions,
         });
+
+        this.#assertFoundingPreparation(
+          parentState,
+          parentLifecycle,
+          parentRevision,
+        );
 
         // D-01/D-02: validate the staged commit before any lifecycle
         // transition — the identical FOUND-02 gate `case "commit"` and `case
@@ -1453,8 +1839,13 @@ export class MarmotGroupEngine<TEnvelope> {
           "begin_pending",
           "foundingAdd",
         );
-        this.#stagedCommitParentEpoch = Number(parentState.groupContext.epoch);
-        this.#sentContentIds.add(contentDedupId(commit));
+        this.#rememberSent(commit);
+        this.#stagedCommit = {
+          parentTag: bytesToHex(parentState.confirmationTag),
+          sourceEpoch: Number(parentState.groupContext.epoch),
+          childTag: bytesToHex(newState.confirmationTag),
+          contentId: contentDedupId(commit),
+        };
 
         return {
           kind: "foundingGroupCreated",
@@ -1536,16 +1927,20 @@ export class MarmotGroupEngine<TEnvelope> {
         // engine Stable with nothing to roll back. The parent-epoch pin keeps
         // retained pruning from dropping the epoch this commit branches from
         // while its publish is unconfirmed.
-        const envelope = await this.peeler.wrapGroupMessage(commit, this.state);
+        this.#rememberSent(commit);
+        const envelope = await wrap(commit, this.state);
 
         this.#transitionLifecycle(
           groupLifecycleStates.pendingPublish,
           "begin_pending",
           "selfUpdate",
         );
-        this.#stagedCommitParentEpoch = Number(parentState.groupContext.epoch);
-
-        this.#sentContentIds.add(contentDedupId(commit));
+        this.#stagedCommit = {
+          parentTag: bytesToHex(parentState.confirmationTag),
+          sourceEpoch: Number(parentState.groupContext.epoch),
+          childTag: bytesToHex(newState.confirmationTag),
+          contentId: contentDedupId(commit),
+        };
 
         // CR-09: carry `parentState` and `commitMessage` so `confirmPublished`
         // can record this commit into retained history and the fork tree. A
@@ -1926,6 +2321,8 @@ export class MarmotGroupEngine<TEnvelope> {
    * its own convergence persistence.
    */
   confirmPublished(pending: PendingState): StateNotification[] {
+    this.#assertMutationAllowed();
+    this.#pendingConfirmations.delete(pending);
     if (pending.kind === "commit" || pending.kind === "selfUpdate") {
       if (!pending.parentState || !pending.commitMessage) {
         throw new Error(
@@ -1961,7 +2358,7 @@ export class MarmotGroupEngine<TEnvelope> {
           });
           return [];
         } finally {
-          this.#stagedCommitParentEpoch = undefined;
+          this.#stagedCommit = undefined;
           this.#scheduleRetainedContinuation();
         }
       }
@@ -2006,7 +2403,7 @@ export class MarmotGroupEngine<TEnvelope> {
           "merge_complete",
           pending.kind,
         );
-        this.#stagedCommitParentEpoch = undefined;
+        this.#stagedCommit = undefined;
         this.#scheduleRetainedContinuation();
       }
     }
@@ -2029,6 +2426,8 @@ export class MarmotGroupEngine<TEnvelope> {
    * the engine would be stuck unable to prepare any further commit.
    */
   publishFailed(pending: PendingState): void {
+    this.#assertMutationAllowed();
+    this.#pendingConfirmations.delete(pending);
     if (pending.kind !== "commit" && pending.kind !== "selfUpdate") return;
     if (this.#lifecycle !== groupLifecycleStates.pendingPublish) return;
     const pendingEpoch = Number(pending.newState.groupContext.epoch);
@@ -2044,7 +2443,7 @@ export class MarmotGroupEngine<TEnvelope> {
       "publish_failed",
       pending.kind,
     );
-    this.#stagedCommitParentEpoch = undefined;
+    this.#stagedCommit = undefined;
     this.#scheduleRetainedContinuation();
   }
 
@@ -2066,135 +2465,140 @@ export class MarmotGroupEngine<TEnvelope> {
    * `GroupSession`) already does exactly that.
    *
    * @yields DispositionedIngestResult - processing result plus inbound
-   *   {@link Disposition}.
+   *   {@link @internet-privacy/marmot-ts/core!Disposition}.
    */
   async *ingest(
     envelopes: TEnvelope[],
     options?: { maxRetries?: number },
   ): AsyncGenerator<DispositionedIngestResult<TEnvelope>> {
-    await this.#disbandHydrated;
-    // WR-06 (D-11): the authoritative gate for direct engine callers (and
-    // `driveConvergence`). Refuse every envelope before the pool re-feed, the
-    // tree sweep, tree-fed re-convergence (whose witness gathering would peel
-    // and process these refused envelopes), and the self_remove auto-commit
-    // (whose send() would throw out of this generator). The same gate inside
-    // `ingestEnvelopes` stays as the pipeline-level backstop.
-    const profileSupport = this.profileSupport;
-    if (profileSupport.kind === "unsupported") {
-      for (const envelope of envelopes) {
-        this.#emitIngestEntry(envelope);
-        const skipped: IngestResult<TEnvelope> = {
-          kind: "skipped",
-          envelope,
-          reason: "unsupported-profile",
-        };
+    const leaveAdmission = await this.#enterAdmission();
+    try {
+      await this.#disbandHydrated;
+      // WR-06 (D-11): the authoritative gate for direct engine callers (and
+      // `driveConvergence`). Refuse every envelope before the pool re-feed, the
+      // tree sweep, tree-fed re-convergence (whose witness gathering would peel
+      // and process these refused envelopes), and the self_remove auto-commit
+      // (whose send() would throw out of this generator). The same gate inside
+      // `ingestEnvelopes` stays as the pipeline-level backstop.
+      const profileSupport = this.profileSupport;
+      if (profileSupport.kind === "unsupported") {
+        for (const envelope of envelopes) {
+          this.#emitIngestEntry(envelope);
+          const skipped: IngestResult<TEnvelope> = {
+            kind: "skipped",
+            envelope,
+            reason: "unsupported-profile",
+          };
+          const dispositioned = {
+            ...skipped,
+            disposition: ingestResultDisposition(skipped),
+          };
+          this.#emitIngestOutcome(dispositioned);
+          yield dispositioned;
+        }
+        return;
+      }
+      if (!mayApplyRetainedInbound(this.#lifecycle)) {
+        this.#retainedPassInput.push(...envelopes);
+        return;
+      }
+      if (
+        this.#convergencePass &&
+        this.#now() >= this.#convergencePass.deadlineMs
+      ) {
+        this.#retainedPassInput.push(...envelopes);
+        this.#closeConvergencePass();
+        this.#scheduleRetainedContinuation();
+        return;
+      }
+      // Track this batch's convergence signal (B5): whether it carried any
+      // convergence-relevant input (commits / fork material), whether anything was
+      // left undispositioned (a deferred commit ⇒ Resolving), and whether it hit a
+      // blocking missing-anchor error (⇒ Blocked).
+      let convergenceRelevant = false;
+      let unresolved = false;
+      let blocked = false;
+      for (const envelope of envelopes) this.#emitIngestEntry(envelope);
+
+      for await (const result of this.#ingestWithPool(envelopes, options)) {
+        if (this.#isConvergenceRelevant(result)) convergenceRelevant = true;
+        if (result.kind === "deferred") unresolved = true;
+        if (
+          result.kind === "skipped" &&
+          result.reason === "missing-retained-anchor"
+        )
+          blocked = true;
+
         const dispositioned = {
-          ...skipped,
-          disposition: ingestResultDisposition(skipped),
+          ...result,
+          disposition: ingestResultDisposition(result),
+        };
+        this.#emitIngestOutcome(dispositioned);
+        yield dispositioned;
+        if (
+          (result.kind === "processed" || result.kind === "removed") &&
+          result.notifications !== undefined
+        ) {
+          for (const group of groupWithdrawnNotificationsByCommit(
+            result.notifications,
+          )) {
+            const appliedNotifications = {
+              kind: "appliedNotifications" as const,
+              commitDigest: group.commitDigest,
+              notifications: group.withdrawn,
+            };
+            const appliedDispositioned = {
+              ...appliedNotifications,
+              disposition: ingestResultDisposition(appliedNotifications),
+            };
+            this.#emitIngestOutcome(appliedDispositioned);
+            yield appliedDispositioned;
+          }
+        }
+      }
+
+      // A convergence pass ran only if convergence-relevant input arrived; a batch
+      // of pure application messages or lone proposals MUST NOT reset the
+      // quiescence window or overwrite the last pass's status inputs.
+      if (convergenceRelevant) {
+        const nowMs = this.#now();
+        this.#lastConvergenceRelevantInputMs = nowMs;
+        this.admitConvergencePass();
+        this.#lastPassUnresolved = unresolved;
+        this.#lastPassBlocked = blocked;
+        // The window just reset; arm the settle-check so queued outbound is
+        // re-evaluated once it elapses (B5). Reschedules any prior pending check.
+        this.#scheduleSettleCheck();
+      }
+
+      // After the batch, if this client is the deterministically-elected committer
+      // for any pending self_remove proposals, build and stage a self_remove-only
+      // commit (B6, member-departure.md). It is surfaced as an `autoCommit` result;
+      // the layer that owns the transport publishes it (publish-before-apply).
+      // WR-01: an auto-commit failure must never abort the public ingest()
+      // generator after results have already been yielded — the caller's
+      // trailing save() (`GroupSession.ingest`) would be skipped and the rest of
+      // the batch lost. The client layer already treats a failed auto-commit as
+      // retry-on-next-ingest, so log and continue.
+      let auto: AutoCommitIngestResult<TEnvelope> | undefined;
+      try {
+        auto = await this.#maybeAutoCommitSelfRemoves();
+      } catch (error) {
+        this.#log()(
+          "auto-commit of staged self_remove proposals failed: %o",
+          error,
+        );
+      }
+      if (auto) {
+        const dispositioned = {
+          ...auto,
+          disposition: ingestResultDisposition(auto),
         };
         this.#emitIngestOutcome(dispositioned);
         yield dispositioned;
       }
-      return;
-    }
-    if (!mayApplyRetainedInbound(this.#lifecycle)) {
-      this.#retainedPassInput.push(...envelopes);
-      return;
-    }
-    if (
-      this.#convergencePass &&
-      this.#now() >= this.#convergencePass.deadlineMs
-    ) {
-      this.#retainedPassInput.push(...envelopes);
-      this.#closeConvergencePass();
-      this.#scheduleRetainedContinuation();
-      return;
-    }
-    // Track this batch's convergence signal (B5): whether it carried any
-    // convergence-relevant input (commits / fork material), whether anything was
-    // left undispositioned (a deferred commit ⇒ Resolving), and whether it hit a
-    // blocking missing-anchor error (⇒ Blocked).
-    let convergenceRelevant = false;
-    let unresolved = false;
-    let blocked = false;
-    for (const envelope of envelopes) this.#emitIngestEntry(envelope);
-
-    for await (const result of this.#ingestWithPool(envelopes, options)) {
-      if (this.#isConvergenceRelevant(result)) convergenceRelevant = true;
-      if (result.kind === "deferred") unresolved = true;
-      if (
-        result.kind === "skipped" &&
-        result.reason === "missing-retained-anchor"
-      )
-        blocked = true;
-
-      const dispositioned = {
-        ...result,
-        disposition: ingestResultDisposition(result),
-      };
-      this.#emitIngestOutcome(dispositioned);
-      yield dispositioned;
-      if (
-        (result.kind === "processed" || result.kind === "removed") &&
-        result.notifications !== undefined
-      ) {
-        for (const group of groupWithdrawnNotificationsByCommit(
-          result.notifications,
-        )) {
-          const appliedNotifications = {
-            kind: "appliedNotifications" as const,
-            commitDigest: group.commitDigest,
-            notifications: group.withdrawn,
-          };
-          const appliedDispositioned = {
-            ...appliedNotifications,
-            disposition: ingestResultDisposition(appliedNotifications),
-          };
-          this.#emitIngestOutcome(appliedDispositioned);
-          yield appliedDispositioned;
-        }
-      }
-    }
-
-    // A convergence pass ran only if convergence-relevant input arrived; a batch
-    // of pure application messages or lone proposals MUST NOT reset the
-    // quiescence window or overwrite the last pass's status inputs.
-    if (convergenceRelevant) {
-      const nowMs = this.#now();
-      this.#lastConvergenceRelevantInputMs = nowMs;
-      this.admitConvergencePass();
-      this.#lastPassUnresolved = unresolved;
-      this.#lastPassBlocked = blocked;
-      // The window just reset; arm the settle-check so queued outbound is
-      // re-evaluated once it elapses (B5). Reschedules any prior pending check.
-      this.#scheduleSettleCheck();
-    }
-
-    // After the batch, if this client is the deterministically-elected committer
-    // for any pending self_remove proposals, build and stage a self_remove-only
-    // commit (B6, member-departure.md). It is surfaced as an `autoCommit` result;
-    // the layer that owns the transport publishes it (publish-before-apply).
-    // WR-01: an auto-commit failure must never abort the public ingest()
-    // generator after results have already been yielded — the caller's
-    // trailing save() (`GroupSession.ingest`) would be skipped and the rest of
-    // the batch lost. The client layer already treats a failed auto-commit as
-    // retry-on-next-ingest, so log and continue.
-    let auto: AutoCommitIngestResult<TEnvelope> | undefined;
-    try {
-      auto = await this.#maybeAutoCommitSelfRemoves();
-    } catch (error) {
-      this.#log()(
-        "auto-commit of staged self_remove proposals failed: %o",
-        error,
-      );
-    }
-    if (auto) {
-      const dispositioned = {
-        ...auto,
-        disposition: ingestResultDisposition(auto),
-      };
-      this.#emitIngestOutcome(dispositioned);
-      yield dispositioned;
+    } finally {
+      leaveAdmission();
     }
   }
 
@@ -2203,26 +2607,31 @@ export class MarmotGroupEngine<TEnvelope> {
    * deadline permit it. Each call is a deterministic one-shot scheduler edge.
    */
   async driveConvergence(): Promise<DispositionedIngestResult<TEnvelope>[]> {
-    if (!mayApplyRetainedInbound(this.#lifecycle)) return [];
-    if (this.#convergencePass) {
-      const cutoffMs = Math.min(
-        this.#convergencePass.deadlineMs,
-        this.#convergencePass.lastRelevantInputMs +
-          this.#settlementQuiescenceMs,
-      );
-      if (this.#now() < cutoffMs) return [];
-      this.#closeConvergencePass();
+    const leaveAdmission = await this.#enterAdmission();
+    try {
+      if (!mayApplyRetainedInbound(this.#lifecycle)) return [];
+      if (this.#convergencePass) {
+        const cutoffMs = Math.min(
+          this.#convergencePass.deadlineMs,
+          this.#convergencePass.lastRelevantInputMs +
+            this.#settlementQuiescenceMs,
+        );
+        if (this.#now() < cutoffMs) return [];
+        this.#closeConvergencePass();
+      }
+      if (this.#disbandCandidates.size > 0) {
+        await this.#settleDisbandCandidates();
+        if (this.#lifecycle === groupLifecycleStates.disbanded) return [];
+      }
+      if (this.#retainedPassInput.length === 0) return [];
+      const retained = this.#retainedPassInput.splice(0);
+      this.admitConvergencePass();
+      const results: DispositionedIngestResult<TEnvelope>[] = [];
+      for await (const result of this.ingest(retained)) results.push(result);
+      return results;
+    } finally {
+      leaveAdmission();
     }
-    if (this.#disbandCandidates.size > 0) {
-      await this.#settleDisbandCandidates();
-      if (this.#lifecycle === groupLifecycleStates.disbanded) return [];
-    }
-    if (this.#retainedPassInput.length === 0) return [];
-    const retained = this.#retainedPassInput.splice(0);
-    this.admitConvergencePass();
-    const results: DispositionedIngestResult<TEnvelope>[] = [];
-    for await (const result of this.ingest(retained)) results.push(result);
-    return results;
   }
 
   /**
@@ -2267,6 +2676,7 @@ export class MarmotGroupEngine<TEnvelope> {
             id,
             result.envelope,
             result.sourceEpoch,
+            result.message,
           );
           if (admission.kind === "refused") {
             this.#capacityRefusedInput.set(id, result.envelope);
@@ -2432,6 +2842,17 @@ export class MarmotGroupEngine<TEnvelope> {
     )
       return undefined;
     const isCommit = framedContentType(message) === contentTypes.commit;
+    const contentId = contentDedupId(message);
+    if (
+      this.#sentContentIds.has(contentId) ||
+      this.#seenContentIds.has(contentId)
+    )
+      return {
+        kind: "skipped",
+        envelope,
+        message,
+        reason: this.#sentContentIds.has(contentId) ? "self-echo" : "duplicate",
+      };
     // D-09 symmetry: an invalid standalone Add must never be staged into a
     // non-canonical fork snapshot either, so the admin callback (which now
     // validates both commit-embedded and standalone Adds) runs for BOTH
@@ -2458,6 +2879,11 @@ export class MarmotGroupEngine<TEnvelope> {
       return undefined; // decrypted but not processable against this node
     }
     const captured = capture.take();
+    if (
+      result.kind === "applicationMessage" ||
+      (result.kind === "newState" && result.actionTaken === "accept")
+    )
+      this.#pool.bindReceiver(this.peeler.idOf(envelope), tag, message);
 
     if (result.kind === "newState") {
       if (result.actionTaken === "reject") {
@@ -2485,12 +2911,15 @@ export class MarmotGroupEngine<TEnvelope> {
         // and its edge would then pin tree-fed branch selection.
         let outcome: CommitLegalityOutcome;
         try {
-          outcome = validateCommitLegality({
-            parentState: state,
-            resultingState: result.newState,
-            proposals: captured.proposals,
-            committerLeafIndex: captured.committerLeafIndex,
-          });
+          outcome = resolveCapturedCommitLegality(
+            validateCommitLegality({
+              parentState: state,
+              resultingState: result.newState,
+              proposals: captured.proposals,
+              committerLeafIndex: captured.committerLeafIndex,
+            }),
+            captured,
+          );
         } catch {
           // Mirrors resolveCandidateParent's `deferred`: keep it pooled.
           return undefined;
@@ -2535,10 +2964,24 @@ export class MarmotGroupEngine<TEnvelope> {
       } catch (error) {
         log("history tree sweep update failed: %o", error);
       }
+      this.#rememberSeen(message);
       return { kind: "processed", result, envelope, message };
     }
 
     if (result.kind === "applicationMessage") {
+      const sourceEpoch = framedEpoch(message);
+      const tipEpoch = Number(this.#state.groupContext.epoch);
+      if (
+        sourceEpoch !== undefined &&
+        Number.isSafeInteger(Number(sourceEpoch)) &&
+        Number.isSafeInteger(tipEpoch) &&
+        isAppPayloadExpired(
+          Number(sourceEpoch),
+          tipEpoch,
+          this.#policy.appPayloadPastEpochLimit,
+        )
+      )
+        return { kind: "skipped", envelope, message, reason: "past-epoch" };
       if (!isAuthenticApplicationMessage(result, state, log, "sweep"))
         return {
           kind: "skipped",
@@ -2553,10 +2996,22 @@ export class MarmotGroupEngine<TEnvelope> {
       // ages out. Returning `undefined` keeps the entry pooled and moves on.
       // `invalidated` is reserved for retracting a payload previously delivered as
       // `accepted` when a rewind abandons its branch (`#applyForkResolution`).
-      return onCanonical &&
-        this.#state.groupActiveState.kind !== "removedFromGroup"
-        ? { kind: "processed", result, envelope, message }
-        : undefined;
+      if (
+        !onCanonical ||
+        this.#state.groupActiveState.kind === "removedFromGroup"
+      )
+        return undefined;
+      this.#rememberSeen(message);
+      this.#delivered.record({
+        epoch: Number(state.groupContext.epoch),
+        stateTag: tag,
+        envelope,
+        message,
+        payload: result.message,
+        ...this.#deliveryAttribution(tag, envelope, result.message),
+      });
+      this.#tree.updateSnapshot(tag, result.newState);
+      return { kind: "processed", result, envelope, message };
     }
 
     return undefined;
@@ -2587,7 +3042,9 @@ export class MarmotGroupEngine<TEnvelope> {
         return true;
       case "skipped":
         return (
-          result.reason === "past-epoch" ||
+          (result.reason === "past-epoch" &&
+            (!result.message ||
+              framedContentType(result.message) === contentTypes.commit)) ||
           result.reason === "beyond-anchor" ||
           result.reason === "missing-retained-anchor"
         );
@@ -2619,15 +3076,20 @@ export class MarmotGroupEngine<TEnvelope> {
       : quiescenceAt;
     const delay = Math.max(0, cutoffAt - nowMs);
     this.#settleTimer = this.#scheduler.setTimer(delay, () => {
+      if (this.#retentionLease) {
+        void this.#retentionLease.done.then(() => this.#runSettleCheck());
+        return;
+      }
       this.#settleTimer = undefined;
       if (this.#convergencePass && this.#now() >= cutoffAt)
         this.#closeConvergencePass();
       // Fire-and-forget; the owner's drain handles and logs its own errors.
-      void this.#onSettleCheck?.();
+      void this.#runSettleCheck();
     });
   }
 
   #closeConvergencePass(): void {
+    this.#assertMutationAllowed();
     this.#convergencePass = undefined;
     if (this.#lastConvergenceRelevantInputMs !== undefined)
       this.#lastConvergenceRelevantInputMs = Math.min(
@@ -2647,8 +3109,24 @@ export class MarmotGroupEngine<TEnvelope> {
       this.#scheduler.clearTimer(this.#settleTimer);
     this.#settleTimer = this.#scheduler.setTimer(0, () => {
       this.#settleTimer = undefined;
-      void this.#onSettleCheck?.();
+      void this.#runSettleCheck();
     });
+  }
+
+  #runSettleCheck(): Promise<void> {
+    if (this.#retentionLease)
+      return this.#retentionLease.done.then(() => this.#runSettleCheck());
+    // Preserve synchronous wakeup timing; own the callback until any returned promise settles.
+    this.#activeAdmissions++;
+    try {
+      return Promise.resolve(this.#onSettleCheck?.()).finally(async () => {
+        this.#activeAdmissions--;
+        if (!this.#activeAdmissions) await completeSettledRetentionOwner(this);
+      });
+    } catch (error) {
+      this.#activeAdmissions--;
+      throw error;
+    }
   }
 
   /**
@@ -2771,10 +3249,41 @@ export class MarmotGroupEngine<TEnvelope> {
     };
   }
 
-  /** Leaf indices of all occupied leaves in the current ratchet tree. */
-  #occupiedLeafIndices(): number[] {
+  /**
+   * Public ClientState remains a trusted mutable object. Persistent direct
+   * proposal edits are caught at checkpoints; direct nested edits restored
+   * before both checkpoints are outside this mutation-history guarantee.
+   * MDK makes creation structurally exclusive inside do_create_group
+   * (refs/mdk/crates/cgka-engine/src/group_lifecycle.rs); our public async
+   * foundingAdd seam needs explicit checks (protocol-core/joining.md and
+   * protocol-core/publish-lifecycle.md).
+   */
+  #assertFoundingPreparation(
+    parentState: ClientState,
+    parentLifecycle: GroupLifecycleState,
+    parentRevision: bigint,
+  ): void {
+    const occupiedLeaves = this.#occupiedLeafIndices(parentState);
+    if (
+      this.#mutationRevision !== parentRevision ||
+      this.#state !== parentState ||
+      this.#lifecycle !== parentLifecycle ||
+      this.#lifecycle !== groupLifecycleStates.stable ||
+      parentState.groupContext.epoch !== 0n ||
+      occupiedLeaves.length !== 1 ||
+      occupiedLeaves[0] !== Number(parentState.privatePath.leafIndex) ||
+      Object.keys(parentState.unappliedProposals).length !== 0
+    ) {
+      throw new Error(
+        "foundingAdd: state or lifecycle changed during preparation; retry from the current state",
+      );
+    }
+  }
+
+  /** Leaf indices of all occupied leaves in a ratchet tree. */
+  #occupiedLeafIndices(state = this.#state): number[] {
     const out: number[] = [];
-    const tree = this.#state.ratchetTree;
+    const tree = state.ratchetTree;
     for (let nodeIndex = 0; nodeIndex < tree.length; nodeIndex++) {
       const node = tree[nodeIndex];
       if (node && node.nodeType === nodeTypes.leaf)
@@ -2784,9 +3293,11 @@ export class MarmotGroupEngine<TEnvelope> {
   }
 
   #setState(newState: ClientState): void {
+    this.#assertMutationAllowed();
     const epochChanged =
       newState.groupContext.epoch !== this.#state.groupContext.epoch;
     this.#state = newState;
+    this.#mutationRevision++;
     if (
       epochChanged &&
       this.#disbandRequest?.status === "pending" &&
@@ -2934,8 +3445,10 @@ export class MarmotGroupEngine<TEnvelope> {
     reason: string,
     pendingKind?: string,
   ): void {
+    this.#assertMutationAllowed();
     const previous = this.#lifecycle;
     this.#lifecycle = transitionLifecycle(this.#lifecycle, next);
+    this.#mutationRevision++;
     this.#emitAudit({
       type: "epoch_state_changed",
       previous_state: auditEpochStateName(previous),
@@ -3041,6 +3554,7 @@ export class MarmotGroupEngine<TEnvelope> {
       peeler: this.peeler,
       retained: this.#retained,
       maxRewindCommits: this.#policy.maxRewindCommits,
+      appPayloadPastEpochLimit: this.#policy.appPayloadPastEpochLimit,
       log: this.#log(),
       getState: () => this.#state,
       isDisbanded: () => this.#lifecycle === groupLifecycleStates.disbanded,
@@ -3091,7 +3605,7 @@ export class MarmotGroupEngine<TEnvelope> {
           return undefined;
         },
         remember: (message) => {
-          this.#seenContentIds.add(contentDedupId(message));
+          this.#rememberSeen(message);
         },
       },
     };
@@ -3151,7 +3665,10 @@ export class MarmotGroupEngine<TEnvelope> {
     try {
       const parentTag = bytesToHex(parentState.confirmationTag);
       if (!this.#tree.hasNode(parentTag)) this.#tree.setRoot(parentState);
-      this.#tree.recordCommit(parentTag, message, resultingState);
+      // MLS removal retains the parent's tag/epoch. Its terminal edge is
+      // carried by authenticated candidate evidence, not a cyclic tree node.
+      if (bytesToHex(resultingState.confirmationTag) !== parentTag)
+        this.#tree.recordCommit(parentTag, message, resultingState);
     } catch (error) {
       this.#log()("terminal candidate tree retention failed: %o", error);
     }
@@ -3190,10 +3707,15 @@ export class MarmotGroupEngine<TEnvelope> {
         this.#createAdminVerificationCallback(parent),
       terminalCandidates,
       knownCandidates: new Map(
-        candidates.map(({ evidence, resultingState }) => [
-          bytesToHex(evidence.commitDigest),
-          { parentTag: evidence.parentTag, state: resultingState },
-        ]),
+        candidates
+          .filter(
+            ({ resultingState }) =>
+              resultingState.groupActiveState.kind !== "removedFromGroup",
+          )
+          .map(({ evidence, resultingState }) => [
+            bytesToHex(evidence.commitDigest),
+            { parentTag: evidence.parentTag, state: resultingState },
+          ]),
       ),
     });
     this.#disbandCandidates.clear();
@@ -3352,6 +3874,13 @@ export class MarmotGroupEngine<TEnvelope> {
       app_witness_score: resolution.decision?.score.appWitnessScore,
     });
     this.#transitionLifecycle(groupLifecycleStates.recovering, "fork_detected");
+    if (resolution.selectedTerminal) {
+      this.#selectedDisbandEvidence = resolution.selectedTerminal;
+      this.#onSelectedDisband?.(
+        resolution.selectedTerminal,
+        resolution.winnerTip,
+      );
+    }
     this.#setState(resolution.winnerTip);
     for (const link of resolution.winnerChain) {
       this.#retained.record(
@@ -3500,6 +4029,258 @@ export class MarmotGroupEngine<TEnvelope> {
    * `processed` result — the now-canonical branch's app messages surface via a
    * follow-up sweep). No-op unless `Stable` and the tree holds a competing tip.
    */
+  /** Replay exact-anchor retained descendants before granting membership recovery. */
+  async recoverRemovedFromAnchor(
+    attribution: RemovalAttribution,
+    expectedTip?: string,
+  ): Promise<RemovalRecovery | undefined> {
+    const leaveAdmission = await this.#enterAdmission();
+    try {
+      if (!attribution) return undefined;
+      const live = this.#state;
+      if (
+        live.groupActiveState.kind !== "removedFromGroup" ||
+        bytesToHex(live.confirmationTag) !== attribution.parentTag ||
+        Number(live.groupContext.epoch) !== attribution.parentEpoch ||
+        bytesToHex(live.groupContext.groupId) !== attribution.groupId
+      )
+        return undefined;
+      const selected = await this.#validateRemovalRecovery(
+        attribution,
+        expectedTip,
+      );
+      if (!selected) return undefined;
+      // Retain the validated canonical path before observers see its new tip.
+      // Each snapshot was captured before replay could consume its secrets.
+      for (const link of selected.chain)
+        this.#retained.record(
+          link.parentState,
+          link.message,
+          link.resultingState,
+          this.#pinnedEpochs(),
+          link.ownCommitStamp,
+        );
+      this.state = selected.state;
+      return selected.authority;
+    } finally {
+      leaveAdmission();
+    }
+  }
+
+  /** Validate an already-saved active projection against durable selection authority. */
+  async validateRemovalRecovery(
+    attribution: RemovalAttribution,
+    authority: RemovalRecovery,
+    state: ClientState = this.#state,
+  ): Promise<boolean> {
+    const leaveAdmission = await this.#enterAdmission();
+    try {
+      if (!authority || !attribution) return false;
+      if (
+        authority.removalDigest !== attribution.removalDigest ||
+        authority.parentTag !== attribution.parentTag
+      )
+        return false;
+      const selected = await this.#validateRemovalRecovery(
+        attribution,
+        authority.selectedTip,
+      );
+      if (
+        !selected ||
+        state.groupActiveState.kind !== "active" ||
+        bytesToHex(state.groupContext.groupId) !== attribution.groupId ||
+        bytesToHex(state.confirmationTag) !== authority.selectedTip ||
+        state.groupContext.epoch !== selected.state.groupContext.epoch
+      )
+        return false;
+      try {
+        return (
+          Number(state.privatePath.leafIndex) === attribution.localLeaf &&
+          getCredentialPubkey(
+            getCredentialFromLeafIndex(
+              state.ratchetTree,
+              state.privatePath.leafIndex as LeafIndex,
+            ),
+          ) === attribution.localIdentity &&
+          bytesToHex(state.groupContext.treeHash) ===
+            bytesToHex(selected.state.groupContext.treeHash) &&
+          bytesToHex(state.groupContext.confirmedTranscriptHash) ===
+            bytesToHex(selected.state.groupContext.confirmedTranscriptHash) &&
+          bytesToHex(serializeClientState(state)) ===
+            bytesToHex(serializeClientState(selected.state))
+        );
+      } catch {
+        return false;
+      }
+    } finally {
+      leaveAdmission();
+    }
+  }
+
+  async #validateRemovalRecovery(
+    attribution: RemovalAttribution,
+    expectedTip?: string,
+  ): Promise<
+    | {
+        state: ClientState;
+        authority: RemovalRecovery;
+        chain: RetainedAppliedLink[];
+      }
+    | undefined
+  > {
+    if (
+      !attribution ||
+      ![1, 2].includes(attribution.version) ||
+      (attribution.version === 2 &&
+        (typeof attribution.removingCommitter !== "string" ||
+          !/^([0-9a-f]{64})?$/.test(attribution.removingCommitter))) ||
+      !/^[0-9a-f]{64}$/.test(attribution.removalDigest) ||
+      !Number.isSafeInteger(attribution.parentEpoch) ||
+      attribution.parentEpoch < 0 ||
+      !Number.isSafeInteger(attribution.localLeaf) ||
+      attribution.localLeaf < 0
+    )
+      return undefined;
+    const parent = await this.#tree.stateAt(attribution.parentTag);
+    if (
+      !parent ||
+      parent.groupActiveState.kind !== "active" ||
+      bytesToHex(parent.groupContext.groupId) !== attribution.groupId ||
+      bytesToHex(parent.confirmationTag) !== attribution.parentTag ||
+      Number(parent.groupContext.epoch) !== attribution.parentEpoch ||
+      Number(parent.privatePath.leafIndex) !== attribution.localLeaf
+    )
+      return undefined;
+    try {
+      if (
+        getCredentialPubkey(
+          getCredentialFromLeafIndex(
+            parent.ratchetTree,
+            parent.privatePath.leafIndex as LeafIndex,
+          ),
+        ) !== attribution.localIdentity
+      )
+        return undefined;
+    } catch {
+      return undefined;
+    }
+    const incumbent: BranchCandidate = {
+      id: "removal-incumbent",
+      forkEpoch: attribution.parentEpoch,
+      tipEpoch: attribution.parentEpoch + 1,
+      tipDigest: hexToBytes(attribution.removalDigest),
+      // Legacy records have no authenticated sender: the empty normal input
+      // conservatively outranks public-member identities at equal depth.
+      tipCommitter: hexToBytes(
+        attribution.version === 2 ? attribution.removingCommitter! : "",
+      ),
+      appWitnesses: [],
+    };
+    let candidates = await buildRemovalBranchSet(this.#tree, attribution);
+    if (!candidates) return undefined;
+    while (candidates.length) {
+      const winner = selectCanonicalBranch(
+        attribution.parentEpoch + 1,
+        [...candidates, incumbent],
+        this.#policy,
+      );
+      if (
+        !winner ||
+        winner === incumbent ||
+        (expectedTip && winner.id !== expectedTip)
+      )
+        return undefined;
+      const replay = await this.#treeResolution(
+        attribution.parentTag,
+        winner.id,
+      );
+      if (replay.kind === "deferred") return undefined;
+      if (replay.kind === "invalid") {
+        candidates = candidates.filter((c) => c.id !== winner.id);
+        const prefix =
+          replay.lastValidTag &&
+          this.#treePrefixCandidate(winner, replay.lastValidTag);
+        if (prefix && !candidates.some((c) => c.id === prefix.id)) {
+          prefix.tipCommitter = await treeTipCommitter(this.#tree, prefix.id);
+          if (!prefix.tipCommitter) return undefined;
+          candidates.push(prefix);
+        }
+        continue;
+      }
+      // Replay consecutively from the exact active parent. Independent checks
+      // against stored parents alone must not grant authority to altered snapshots.
+      let state = deserializeClientState(serializeClientState(parent));
+      const chain: RetainedAppliedLink[] = [];
+      for (const link of replay.resolution.winnerChain) {
+        if (
+          link.message.wireformat !== wireformats.mls_private_message &&
+          link.message.wireformat !== wireformats.mls_public_message
+        )
+          return undefined;
+        const tag = bytesToHex(link.child.confirmationTag);
+        const stamp = await this.#tree.ownCommitStampOf(tag);
+        const parentState = deserializeClientState(serializeClientState(state));
+        const next = await resolveCandidateParent({
+          ciphersuite: this.ciphersuite,
+          parent: state,
+          message: link.message,
+          callback: this.#createAdminVerificationCallback(state),
+          known: stamp
+            ? {
+                parentTag: bytesToHex(link.parent.confirmationTag),
+                state: link.child,
+              }
+            : undefined,
+        });
+        if (
+          next.kind !== "resolved" ||
+          bytesToHex(next.result.newState.confirmationTag) !== tag ||
+          next.result.newState.groupContext.epoch !==
+            state.groupContext.epoch + 1n ||
+          bytesToHex(next.result.newState.groupContext.groupId) !==
+            attribution.groupId
+        )
+          return undefined;
+        state = next.result.newState;
+        chain.push({
+          parentState,
+          message: link.message,
+          resultingState: deserializeClientState(serializeClientState(state)),
+          ownCommitStamp: stamp,
+        });
+      }
+      if (
+        state.groupActiveState.kind !== "active" ||
+        bytesToHex(state.groupContext.groupId) !== attribution.groupId ||
+        Number(state.privatePath.leafIndex) !== attribution.localLeaf
+      )
+        return undefined;
+      try {
+        if (
+          getCredentialPubkey(
+            getCredentialFromLeafIndex(
+              state.ratchetTree,
+              state.privatePath.leafIndex as LeafIndex,
+            ),
+          ) !== attribution.localIdentity
+        )
+          return undefined;
+      } catch {
+        return undefined;
+      }
+      return {
+        state,
+        chain,
+        authority: {
+          removalDigest: attribution.removalDigest,
+          parentTag: attribution.parentTag,
+          selectedTip: winner.id,
+        },
+      };
+    }
+    return undefined;
+  }
+
   async *#reconvergeFromTree(
     witnessEnvelopes: TEnvelope[],
   ): AsyncGenerator<IngestResult<TEnvelope>> {
@@ -3649,16 +4430,21 @@ export class MarmotGroupEngine<TEnvelope> {
   async reconvergeFromHistory(): Promise<
     DispositionedIngestResult<TEnvelope>[]
   > {
-    const results: DispositionedIngestResult<TEnvelope>[] = [];
-    for await (const result of this.#reconvergeFromTree([])) {
-      const dispositioned = {
-        ...result,
-        disposition: ingestResultDisposition(result),
-      };
-      this.#emitIngestOutcome(dispositioned);
-      results.push(dispositioned);
+    const leaveAdmission = await this.#enterAdmission();
+    try {
+      const results: DispositionedIngestResult<TEnvelope>[] = [];
+      for await (const result of this.#reconvergeFromTree([])) {
+        const dispositioned = {
+          ...result,
+          disposition: ingestResultDisposition(result),
+        };
+        this.#emitIngestOutcome(dispositioned);
+        results.push(dispositioned);
+      }
+      return results;
+    } finally {
+      leaveAdmission();
     }
-    return results;
   }
 
   /**

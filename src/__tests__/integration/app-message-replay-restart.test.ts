@@ -1,5 +1,4 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { EventSigner } from "applesauce-core";
 import {
   CiphersuiteImpl,
   createApplicationMessage,
@@ -31,7 +30,7 @@ import { generateKeyPackage } from "../../core/key-package.js";
 import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import { testAccount } from "../helpers/test-accounts.js";
 import { TerminalWrapperLedger } from "../../client/group/wrapper-ledger.js";
-import restartFaultFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/restart-delivery-faults.v1.json";
+import restartFaultFixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/restart-delivery-faults.v1.json" with { type: "json" };
 import { projectCanonicalConformanceSnapshot } from "../conformance/snapshot.js";
 
 const NETWORK: NostrNetworkInterface = {
@@ -68,6 +67,9 @@ describe("application message replay across restart", () => {
     const expected = restartFaultFixture.expected_outcomes.find(
       (outcome) => outcome.type === "client_state",
     );
+    expect(expected).toBeDefined();
+    if (!expected || expected.member_count === undefined)
+      throw new Error("expected pinned client-state member count");
 
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
@@ -148,7 +150,7 @@ describe("application message replay across restart", () => {
       {
         store,
         ingestStateStore,
-        signer: { getPublicKey: async () => alice } as EventSigner,
+        signer: aliceAccount.signer,
         ciphersuite: impl,
         network: NETWORK,
       },
@@ -159,14 +161,14 @@ describe("application message replay across restart", () => {
     expect(
       results.filter((result) => result.kind === "processed"),
     ).toHaveLength(1);
-    expect(Number(restarted.state.groupContext.epoch)).toBe(expected?.epoch);
+    expect(Number(restarted.state.groupContext.epoch)).toBe(expected.epoch);
     const snapshot = await projectCanonicalConformanceSnapshot({
       state: restarted.state,
       ciphersuite: impl,
       lifecycle: restarted.lifecycle,
       convergenceStatus: restarted.convergenceStatus,
     });
-    expect(snapshot.leaves).toHaveLength(expected?.member_count);
+    expect(snapshot.leaves).toHaveLength(expected.member_count);
   });
   it("recovers a prepared wrapper on either side of the canonical-state write", async () => {
     const ingestStateStore = new InMemoryKeyValueStore<Uint8Array>();
@@ -261,7 +263,7 @@ describe("application message replay across restart", () => {
 
     const store = new InMemoryKeyValueStore<SerializedClientState>();
     const ingestStateStore = new InMemoryKeyValueStore<Uint8Array>();
-    const signer = { getPublicKey: async () => adminPubkey } as EventSigner;
+    const signer = adminAccount.signer;
 
     // Session 1: the admin delivers the message exactly once. Ingest persists the
     // advanced ratchet state to `store`.

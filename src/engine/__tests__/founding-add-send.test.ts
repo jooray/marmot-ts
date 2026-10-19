@@ -42,7 +42,7 @@ import {
   getCiphersuiteImpl,
   type Proposal,
 } from "ts-mls";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { forgeKeyPackage } from "../../__tests__/helpers/account-identity-proof-fixtures.js";
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
@@ -58,6 +58,9 @@ import { CommitLegalityError, MarmotGroupEngine } from "../group-engine.js";
 import type { GroupPeeler, ProposalContext, SendIntent } from "../types.js";
 import type { GroupSessionSendIntent } from "../../client/session/group-effects.js";
 import { framedCommitProposals } from "../wire-format.js";
+import { MemoryAuditSink } from "../../audit/sink.js";
+import * as messageDedup from "../message-dedup.js";
+import { RetainedHistoryStore } from "../retained-store.js";
 
 /** A real crypto-backed peeler that also counts `wrapGroupMessage` calls (FOUND-01). */
 function countingPeeler(ciphersuite: CiphersuiteImpl): {
@@ -118,6 +121,335 @@ async function inviteeKeyPackage(slot: number, impl: CiphersuiteImpl) {
     ciphersuiteImpl: impl,
   });
 }
+
+function barrier() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+/** Pause only the first real signature, without changing the shared provider. */
+function signingBarrier(original: CiphersuiteImpl) {
+  const entered = barrier();
+  const resume = barrier();
+  let signs = 0;
+  const ciphersuite: CiphersuiteImpl = {
+    ...original,
+    signature: {
+      ...original.signature,
+      async sign(key, message) {
+        const signature = await original.signature.sign(key, message);
+        if (++signs === 1) {
+          entered.release();
+          await resume.promise;
+        }
+        return signature;
+      },
+    },
+  };
+  return { ciphersuite, entered, resume, signs: () => signs };
+}
+
+describe.each(["proposal builder", "real crypto"] as const)(
+  "foundingAdd %s race matrix",
+  (window) => {
+    it.each([
+      "parent replacement",
+      "persistent direct proposal",
+      "state away and back",
+      "proposal-bearing state away and back",
+      "lifecycle away and back",
+      "competing founding pending",
+      "competing founding confirmed",
+      "competing ordinary pending",
+      "competing ordinary confirmed",
+    ] as const)(
+      "refuses %s and preserves intervening work",
+      async (mutation) => {
+        const { impl, adminPubkey, epoch0 } = await foundingGroup();
+        const sharedSignature = impl.signature;
+        const invitee = await inviteeKeyPackage(9, impl);
+        const competingInvitee = await inviteeKeyPackage(11, impl);
+        const crypto = signingBarrier(impl);
+        const entered = window === "real crypto" ? crypto.entered : barrier();
+        const resume = window === "real crypto" ? crypto.resume : barrier();
+        const ciphersuite =
+          window === "real crypto" ? crypto.ciphersuite : impl;
+        const { peeler, wrapCount } = countingPeeler(ciphersuite);
+        const changes: unknown[] = [];
+        const audit = new MemoryAuditSink();
+        const retained = new RetainedHistoryStore(epoch0);
+        const record = vi.spyOn(retained, "record");
+        const engine = new MarmotGroupEngine({
+          state: epoch0,
+          ciphersuite,
+          peeler,
+          retained,
+          onStateChanged: (state) => changes.push(state),
+          audit,
+          auditContext: { engineId: "founding-race" },
+        });
+        const dedup = vi.spyOn(messageDedup, "contentDedupId");
+        const add: Proposal = {
+          proposalType: defaultProposalTypes.add,
+          add: { keyPackage: invitee.publicPackage },
+        };
+        const preparation = engine.send({
+          kind: "foundingAdd",
+          actorPubkey: adminPubkey,
+          extraProposals: [
+            window === "real crypto"
+              ? add
+              : async (context) => {
+                  expect(context.state).toBe(epoch0);
+                  entered.release();
+                  await resume.promise;
+                  return add;
+                },
+          ],
+        });
+        const outcome = preparation.then(
+          () => "resolved instead of refusing stale preparation",
+          (error: unknown) =>
+            error instanceof Error ? error.message : String(error),
+        );
+        try {
+          await entered.promise;
+          if (window === "real crypto") expect(crypto.signs()).toBe(1);
+          const proposal = {
+            proposal: {
+              proposalType: defaultProposalTypes.remove,
+              remove: { removed: 0 },
+            } as Proposal,
+            senderLeafIndex: 0,
+          };
+          let competing: Awaited<ReturnType<typeof engine.send>> | undefined;
+          switch (mutation) {
+            case "parent replacement":
+              engine.state = { ...epoch0 };
+              break;
+            case "persistent direct proposal":
+              epoch0.unappliedProposals.staged = proposal;
+              break;
+            case "state away and back":
+              engine.state = { ...epoch0 };
+              engine.state = epoch0;
+              break;
+            case "proposal-bearing state away and back":
+              engine.state = {
+                ...epoch0,
+                unappliedProposals: { staged: proposal },
+              };
+              engine.state = epoch0;
+              break;
+            case "lifecycle away and back":
+              competing = await engine.send({
+                kind: "commit",
+                actorPubkey: adminPubkey,
+              });
+              if (competing.kind !== "groupEvolution")
+                throw new Error("expected ordinary commit");
+              engine.publishFailed(competing.pending);
+              expect(engine.state).toBe(epoch0);
+              expect(engine.lifecycle).toBe("Stable");
+              break;
+            case "competing founding pending":
+            case "competing founding confirmed":
+              competing = await engine.send({
+                kind: "foundingAdd",
+                actorPubkey: adminPubkey,
+                extraProposals: [
+                  {
+                    proposalType: defaultProposalTypes.add,
+                    add: { keyPackage: competingInvitee.publicPackage },
+                  },
+                ],
+              });
+              if (competing.kind !== "foundingGroupCreated")
+                throw new Error("expected founding commit");
+              if (mutation === "competing founding confirmed")
+                engine.confirmPublished(competing.pending);
+              break;
+            case "competing ordinary pending":
+            case "competing ordinary confirmed":
+              competing = await engine.send({
+                kind: "commit",
+                actorPubkey: adminPubkey,
+              });
+              if (competing.kind !== "groupEvolution")
+                throw new Error("expected ordinary commit");
+              if (mutation === "competing ordinary confirmed")
+                engine.confirmPublished(competing.pending);
+              break;
+          }
+          const stateAfterIntervention = engine.state;
+          const lifecycleAfterIntervention = engine.lifecycle;
+          const historyAfterIntervention = engine.history.size;
+          const retainedAfterIntervention = engine.retainedStates();
+          const changesAfterIntervention = changes.length;
+          const wrapsAfterIntervention = wrapCount();
+          const auditAfterIntervention = audit.events.length;
+          const dedupAfterIntervention = dedup.mock.calls.length;
+          resume.release();
+          expect(await outcome).toMatch(/foundingAdd:.*changed.*retry/i);
+          expect(engine.state).toBe(stateAfterIntervention);
+          expect(engine.lifecycle).toBe(lifecycleAfterIntervention);
+          expect(engine.history.size).toBe(historyAfterIntervention);
+          expect(engine.retainedStates()).toEqual(retainedAfterIntervention);
+          expect(changes).toHaveLength(changesAfterIntervention);
+          expect(wrapCount()).toBe(wrapsAfterIntervention);
+          // The refusal is audited, but produces no lifecycle/staging event.
+          expect(audit.events.slice(auditAfterIntervention)).toEqual([
+            expect.objectContaining({
+              kind: expect.objectContaining({ type: "send_error" }),
+            }),
+          ]);
+          // No refused-output content id is registered for own-echo handling.
+          expect(dedup.mock.calls).toHaveLength(dedupAfterIntervention);
+          expect(impl.signature).toBe(sharedSignature);
+          if (mutation === "persistent direct proposal") {
+            expect(engine.state.unappliedProposals.staged).toBe(proposal);
+          }
+          if (mutation.endsWith("pending")) {
+            if (!competing || !("pending" in competing))
+              throw new Error("expected competing pending work");
+            // Refusal did not clear/rollback the other operation's pending state.
+            expect(engine.lifecycle).toBe("PendingPublish");
+            engine.confirmPublished(competing.pending);
+            expect(engine.state).toBe(competing.pending.newState);
+            expect(engine.lifecycle).toBe("Stable");
+            expect(engine.history.size).toBe(2);
+            // The pending winner's parent remained pinned until confirmation.
+            expect(Array.from(record.mock.calls.at(-1)![3]!)).toEqual([0]);
+          }
+        } finally {
+          resume.release();
+          crypto.resume.release();
+          await preparation.catch(() => undefined);
+          dedup.mockRestore();
+          record.mockRestore();
+        }
+      },
+    );
+  },
+);
+
+describe("foundingAdd asynchronous preparation", () => {
+  it("proposal builder refuses a persistent direct proposal edit", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const engine = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler,
+    });
+    const proposals = epoch0.unappliedProposals;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      epoch0,
+      "unappliedProposals",
+    );
+    const prototype = Object.getPrototypeOf(proposals);
+    const invitee = await inviteeKeyPackage(9, impl);
+    const entered = barrier();
+    const resume = barrier();
+    const preparation = engine.send({
+      kind: "foundingAdd",
+      actorPubkey: adminPubkey,
+      extraProposals: [
+        async () => {
+          entered.release();
+          await resume.promise;
+          return {
+            proposalType: defaultProposalTypes.add,
+            add: { keyPackage: invitee.publicPackage },
+          };
+        },
+      ],
+    });
+    const refused = expect(preparation).rejects.toThrow(
+      /foundingAdd:.*changed.*retry/i,
+    );
+    try {
+      await entered.promise;
+      proposals.staged = {
+        proposal: {
+          proposalType: defaultProposalTypes.remove,
+          remove: { removed: 0 },
+        },
+        senderLeafIndex: 0,
+      };
+      resume.release();
+      await refused;
+      expect(engine.state).toBe(epoch0);
+      expect(engine.state.unappliedProposals).toBe(proposals);
+      expect(
+        Object.getOwnPropertyDescriptor(epoch0, "unappliedProposals"),
+      ).toEqual(descriptor);
+      expect(Object.getPrototypeOf(proposals)).toBe(prototype);
+      expect(proposals.staged).toBeDefined();
+      expect(engine.lifecycle).toBe("Stable");
+      expect(engine.history.size).toBe(1);
+      expect(wrapCount()).toBe(0);
+    } finally {
+      resume.release();
+      await preparation.catch(() => undefined);
+    }
+  });
+
+  it("proposal builder refuses state away and back before staging", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const changes: unknown[] = [];
+    const engine = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler,
+      onStateChanged: (state) => changes.push(state),
+    });
+    const invitee = await inviteeKeyPackage(9, impl);
+    const entered = barrier();
+    const resume = barrier();
+    const preparation = engine.send({
+      kind: "foundingAdd",
+      actorPubkey: adminPubkey,
+      extraProposals: [
+        async (context) => {
+          expect(context.state).toBe(epoch0);
+          entered.release();
+          await resume.promise;
+          return {
+            proposalType: defaultProposalTypes.add,
+            add: { keyPackage: invitee.publicPackage },
+          };
+        },
+      ],
+    });
+    // Attach the rejection handler before releasing the asynchronous work.
+    const outcome = preparation.then(
+      () => "resolved instead of refusing stale preparation",
+      (error: unknown) =>
+        error instanceof Error ? error.message : String(error),
+    );
+    try {
+      await entered.promise;
+      engine.state = { ...epoch0 };
+      engine.state = epoch0;
+      resume.release();
+      expect(await outcome).toMatch(/foundingAdd:.*changed.*retry/i);
+      expect(engine.state).toBe(epoch0);
+      expect(engine.lifecycle).toBe("Stable");
+      expect(changes).toHaveLength(2);
+      expect(engine.history.size).toBe(1);
+      expect(engine.retainedStates()).toEqual([epoch0]);
+      expect(wrapCount()).toBe(0);
+    } finally {
+      resume.release();
+      await preparation.catch(() => undefined);
+    }
+  });
+});
 
 describe('MarmotGroupEngine#send case "foundingAdd"', () => {
   it("resolves ordered single and array Add builders through the common public contract", async () => {

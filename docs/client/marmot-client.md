@@ -55,8 +55,8 @@ const client = new MarmotClient({
 - **`cryptoProvider`** - Override the MLS crypto provider.
 - **`clientId`** - Default `d`-tag slot for published kind 30443 key packages. `create()` throws `MissingSlotIdentifierError` if neither `clientId` nor an explicit `identifier` is set.
 
-::: warning Spec deviation
-The spec requires the KeyPackage `d` slot to be 32 random bytes encoded as lowercase hex, generated once and persisted, and never derived from a device label or identity material ([`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md)). marmot-ts accepts any string and publishes it unchanged, so generate the value as shown above. Do not use a device name.
+::: warning Publication slot
+The KeyPackage `d` slot must be 32 random bytes encoded as 64 lowercase hexadecimal characters, generated once and persisted, and never derived from a device label or identity material ([`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md)). Publication validates this format and rejects arbitrary labels, uppercase hex, and incorrectly sized values. Generate and retain the slot as shown above; its random origin is your application's responsibility.
 :::
 
 ::: tip Complete Setup Guide
@@ -83,6 +83,19 @@ const group = await client.groups.create("Team Chat", {
 
 Learn more: [Groups in Core Module](/core/groups)
 
+The named `CreateGroupOptions` type is available from
+`@internet-privacy/marmot-ts/client` for reusable creation settings:
+
+```typescript
+import type { CreateGroupOptions } from "@internet-privacy/marmot-ts/client";
+
+const settings = {
+  relays: ["wss://relay.example.com"],
+  adminPubkeys: [myPubkey],
+} satisfies CreateGroupOptions;
+const group = await client.groups.create("Team Chat", settings);
+```
+
 ### Founding creation with initial invitees
 
 Passing `invitees` — an array of published KeyPackage events (kind 30443) — turns `create()` into a **founding creation**: one Add commit carrying every invitee is merged **locally** to epoch 1, so all invitees are members immediately. Like the solo case above, this founding commit publishes **no** group event; the empty publication obligation extends to it too, because no pre-existing peer needs to see it. The client then attempts to send each invitee an independently retryable Welcome.
@@ -100,6 +113,17 @@ Two consequences of this design are worth understanding before you rely on it:
 
 - **`create()` throws when `invitees` is supplied without valid `relays`.** Every Welcome rumor must carry a non-empty list of the group's relays (so the joiner knows where to find future group traffic), and a group created without relays has no Nostr routing component and could never publish — so `create()` refuses a founding create whose `relays` option is absent, empty, or contains an invalid (non-ws/wss) URL. This check runs before any key material is generated or any state is written, so nothing is created, persisted, or published, and no invitee KeyPackage is consumed. A solo `create()` (no `invitees`, or an empty array) may still omit `relays`.
 - **The delivery outcome is discoverable state, not a return value.** `create()` never throws because a Welcome failed to reach an invitee — the group exists at epoch 1 with every member regardless of delivery success. You must check the report yourself; see [`MarmotGroup`'s Welcome delivery section](/client/marmot-group#founding-welcome-delivery-and-retry) for the API and the recovery path (re-inviting with a fresh KeyPackage).
+
+Concurrent Welcome retries for the same recipient share one in-flight delivery. Retries for different recipients proceed independently. A successful recipient keeps its successful outcome and later retries return it without redelivery, even if a concurrent founding fanout later fails. Success and shared retry work apply to the same encoded Welcome, author, recipient and KeyPackage event id; a different obligation starts independently, and older attempts cannot overwrite its outcomes. A failed attempt releases its in-flight work so a later explicit retry can try again; the library does not automatically retry.
+
+Founding Add preparation checks eligibility after asynchronous proposal resolution and again after real MLS commit construction, before staging or adopting output. It refuses with a clear retryable error if any engine-mediated state or lifecycle mutation occurred during preparation, including changes away and back, or if a direct proposal edit is still present at either checkpoint. The refused operation preserves intervening canonical and pending work and does not internally restart preparation. Normal founding creation remains Welcome-only, without publishing its founding commit.
+
+The returned `ClientState` remains a trusted, caller-mutable object. A direct nested proposal edit fully restored before both checkpoints is outside this guarantee. Callers must not mutate returned state during an in-flight founding operation.
+
+The Welcome report and shared in-flight attempts belong to this loaded group
+instance. They do not form a durable outbound journal or coordinate separate
+processes. Check the report after creation and explicitly retry failed recipients
+while their retained obligations remain available.
 
 ### Joining an Existing Group
 
@@ -297,9 +321,17 @@ await client.keyPackages.ensurePublished({ relays: myNip65WriteRelays });
 KeyPackages are created as last-resort by default, so the single package in your device's slot can accept several invites. Kind 30443 is addressable, so repeated `create()` calls in the same `d` slot replace each other on relays and only one stays discoverable. Rotate the package after it has been used (see [Joining an Existing Group](#joining-an-existing-group)). To publish more than one KeyPackage at a time, create extra slots with distinct random `identifier` values.
 :::
 
-::: warning Spec deviation
-marmot-ts marks last-resort KeyPackages with the legacy MLS extension `0x000a` (and advertises it in capabilities). The spec uses app_data_dictionary component `0x0004` instead ([`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md), [`foundation/registries.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/registries.md)).
-:::
+Reusable KeyPackages carry the canonical empty-data `last_resort` component
+`0x0004` in the KeyPackage dictionary. Publication does not emit or advertise the
+legacy `0x000a` extension. See [Key Packages](/core/key-packages) for the current
+component and reuse rules.
+
+For lower-level publisher APIs, import `GeneratedKeyPackage`,
+`GenerateKeyPackageOptions`, and `PublishKeyPackageOptions` from
+`@internet-privacy/marmot-ts/client`. The root and `/core`
+`GenerateKeyPackageOptions` still describe the existing core generator contract;
+the client publisher's options are a distinct type. These named exports are
+type-only; runtime imports remain unchanged.
 
 ## Multi-Account Support
 

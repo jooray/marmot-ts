@@ -4,12 +4,14 @@ import {
   defaultExtensionTypes,
   encode,
   getAppDataDictionary,
+  isDefaultExtension,
   groupContextEncoder,
   mlsExporter,
   nodeTypes,
   type CiphersuiteImpl,
   type ClientState,
   type RequiredCapabilities,
+  type ExtensionRequiredCapabilities,
 } from "ts-mls";
 import { getCredentialPubkey } from "../../core/credential.js";
 
@@ -88,7 +90,6 @@ const SNAPSHOT_KEYS = [
 
 const UINT16_MAX = 0xffff;
 const HEX = /^(?:[0-9a-f]{2})*$/;
-const HASH = /^[0-9a-f]{64}$/;
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -156,9 +157,9 @@ function sortedUniqueStrings(value: unknown, label: string): string[] {
   return value as string[];
 }
 
-export function validateCanonicalConformanceSnapshot(
+function assertCanonicalConformanceSnapshot(
   value: unknown,
-): CanonicalConformanceSnapshot {
+): asserts value is CanonicalConformanceSnapshot {
   const snapshot = object(value, "snapshot");
   exactKeys(snapshot, SNAPSHOT_KEYS, "snapshot");
   hex(snapshot.group_id, "group_id");
@@ -177,9 +178,13 @@ export function validateCanonicalConformanceSnapshot(
       ["index", "account_identity", "signature_public_key", "capabilities"],
       `leaves[${position}]`,
     );
-    if (!Number.isInteger(leaf.index) || (leaf.index as number) <= priorLeaf)
+    if (
+      typeof leaf.index !== "number" ||
+      !Number.isInteger(leaf.index) ||
+      leaf.index <= priorLeaf
+    )
       throw new Error("leaves must be strictly ordered by non-negative index");
-    priorLeaf = leaf.index as number;
+    priorLeaf = leaf.index;
     hex(leaf.account_identity, `leaves[${position}].account_identity`, 64);
     hex(leaf.signature_public_key, `leaves[${position}].signature_public_key`);
     const capabilities = object(
@@ -231,13 +236,14 @@ export function validateCanonicalConformanceSnapshot(
       `app_data_dictionary[${position}]`,
     );
     if (
+      typeof entry.component_id !== "number" ||
       !Number.isInteger(entry.component_id) ||
-      (entry.component_id as number) <= priorComponent
+      entry.component_id <= priorComponent
     )
       throw new Error(
         "app_data_dictionary must be strictly ordered by component_id",
       );
-    priorComponent = entry.component_id as number;
+    priorComponent = entry.component_id;
     hex(entry.value, `app_data_dictionary[${position}].value`);
   }
 
@@ -374,12 +380,19 @@ export function validateCanonicalConformanceSnapshot(
         `application_outputs[${position}] has invalid value or observed field`,
       );
   }
-  return snapshot as unknown as CanonicalConformanceSnapshot;
+}
+
+export function validateCanonicalConformanceSnapshot(
+  value: unknown,
+): CanonicalConformanceSnapshot {
+  assertCanonicalConformanceSnapshot(value);
+  return value;
 }
 
 function requiredCapabilities(state: ClientState): RequiredCapabilities {
   const extension = state.groupContext.extensions.find(
-    (candidate) =>
+    (candidate): candidate is ExtensionRequiredCapabilities =>
+      isDefaultExtension(candidate) &&
       candidate.extensionType === defaultExtensionTypes.required_capabilities,
   );
   if (

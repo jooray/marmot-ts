@@ -55,6 +55,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Typecheck test sources
+        run: pnpm typecheck:tests
+
+      - name: Run portable package and finding invariants
+        run: pnpm test:phase18-invariants
+
       - name: Run tests
         run: pnpm vitest run
 

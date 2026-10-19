@@ -16,6 +16,7 @@ import {
 } from "ts-mls";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GroupsManager } from "../../client/groups-manager.js";
+import { fakeVerifyEvent } from "../../client/verify.js";
 import {
   getNostrGroupIdHex,
   serializeClientState,
@@ -43,7 +44,7 @@ import { ADDRESSABLE_KEY_PACKAGE_KIND } from "../../core/protocol.js";
 import { unixNow } from "../../utils/nostr.js";
 import type { GenericKeyValueStore } from "../../utils/key-value.js";
 import { MockNetwork } from "../helpers/mock-network.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 
 const RELAYS = ["wss://mock-relay.test"];
 
@@ -71,9 +72,15 @@ describe("connection admission", () => {
     }));
     const manager = new GroupsManager({
       store: new InMemoryKeyValueStore<SerializedClientState>(),
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+      ingestPersistence: {
+        kind: "ephemeral",
+        reason: "ingest_state_store_omitted",
+      },
       signer: PrivateKeyAccount.generateNew().signer,
       network,
-      verifyEvent: () => true,
+      verifyEvent: fakeVerifyEvent,
     });
     const group = await manager.create("queued", { relays: RELAYS });
     let peerGroup: MarmotGroup | undefined;
@@ -137,8 +144,9 @@ describe("connection admission", () => {
         yield {
           kind: "unreadable",
           event: events[0],
-          disposition: { kind: "stale" },
-        } as DispositionedIngestResult;
+          errors: [new Error("stale fixture wrapper")],
+          disposition: { kind: "stale", category: "stale_epoch" },
+        } satisfies DispositionedIngestResult;
         yielded.resolve();
         await release.promise;
         starts.push("first-drained");
@@ -299,7 +307,7 @@ describe("connection admission", () => {
         forkEpoch: 1,
         withdrawn: [],
         disposition: { kind: "invalidated" },
-      } as DispositionedIngestResult;
+      } satisfies DispositionedIngestResult;
       const ingest = vi
         .spyOn(timedGroup.session, "ingest")
         .mockImplementation(async function* () {

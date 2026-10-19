@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
 import { marmotAuthService } from "../../core/auth-service.js";
+import { DEFAULT_CONVERGENCE_POLICY } from "../../core/convergence.js";
 import { createCredential } from "../../core/credential.js";
 import { createSimpleGroup } from "../../core/group.js";
 import { generateKeyPackage } from "../../core/key-package.js";
@@ -80,16 +81,43 @@ describe("ingestEnvelopes – deferred (future-epoch commit)", () => {
       wrapGroupMessage() {
         throw new Error("not used");
       },
+      idOf: (envelope) => envelope.id,
     };
 
     const ctx: IngestContext<Envelope> = {
       ciphersuite: impl,
       peeler,
       retained: new RetainedHistoryStore(clientState),
+      maxRewindCommits: DEFAULT_CONVERGENCE_POLICY.maxRewindCommits,
       log: debug("test:ingest-deferred"),
       getState: () => clientState,
       setState: () => {
         throw new Error("setState must not be called for a deferred commit");
+      },
+      recordCommit: () => {
+        throw new Error(
+          "recordCommit must not be called for a deferred commit",
+        );
+      },
+      admitDisbandCandidate: () => {
+        throw new Error(
+          "admitDisbandCandidate must not be called for a deferred commit",
+        );
+      },
+      recordProposalStaged: () => {
+        throw new Error(
+          "recordProposalStaged must not be called for a deferred commit",
+        );
+      },
+      recordDeliveredAppPayload: () => {
+        throw new Error(
+          "recordDeliveredAppPayload must not be called for a deferred commit",
+        );
+      },
+      recordStateNotifications: () => {
+        throw new Error(
+          "recordStateNotifications must not be called for a deferred commit",
+        );
       },
       createAdminCallback: () => () => "accept",
       resolveFork: () => {

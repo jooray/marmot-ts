@@ -1,6 +1,5 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import {
-  type CiphersuiteImpl,
   createCommit,
   defaultCryptoProvider,
   defaultProposalTypes,
@@ -88,7 +87,7 @@ describe("MarmotGroup fork-tree customer API", () => {
     });
     const memberE1 = await joinGroup({
       context: ctx,
-      welcome: welcome!.welcome ?? (welcome as never),
+      welcome: welcome!.welcome,
       keyPackage: memberKp.publicPackage,
       privateKeys: memberKp.privatePackage,
       ratchetTree: undefined,

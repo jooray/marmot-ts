@@ -372,6 +372,7 @@ function cacheCapacity(value: number | undefined, fallback: number): number {
 
 export class GroupImageService {
   private readonly inFlight = new Map<string, ImageOperation>();
+  private readonly activeReads = new Map<GroupImageSnapshotIdentity, number>();
   private readonly plaintext = new Set<Uint8Array>();
   private readonly cache = new Map<
     GroupImageSnapshotIdentity,
@@ -385,6 +386,8 @@ export class GroupImageService {
   constructor(
     private readonly options: {
       getState: () => ClientState;
+      /** @internal Canonical snapshots retained by the session. */
+      getRetainedStates?: () => Iterable<ClientState>;
       isClosed: () => boolean;
       /** Verified in-memory entries, default 16; zero disables caching. */
       maxCacheEntries?: number;
@@ -414,6 +417,26 @@ export class GroupImageService {
     this.plaintext.clear();
     this.cache.clear();
     this.cacheBytes = 0;
+  }
+
+  /** @internal Release detached owned copies after successful session persistence. */
+  retireRetained(branchStates: Iterable<ClientState> = []): void {
+    if (this.isClosed() || this.cache.size === 0) return;
+    const protectedIdentities = new Set(this.activeReads.keys());
+    const protect = (source: GroupImageSource) => {
+      if (source.kind === "blossom")
+        protectedIdentities.add(getGroupImageSnapshotIdentity(source.metadata));
+    };
+    protect(this.source());
+    for (const state of this.options.getRetainedStates?.() ?? [])
+      protect(getGroupImageSource(state));
+    for (const state of branchStates) protect(getGroupImageSource(state));
+    for (const [snapshotIdentity, entry] of this.cache) {
+      if (protectedIdentities.has(snapshotIdentity)) continue;
+      this.cache.delete(snapshotIdentity);
+      this.cacheBytes -= entry.plaintextBytes;
+      this.forget(entry.bytes);
+    }
   }
   private forget(bytes: Uint8Array): void {
     bytes.fill(0);
@@ -587,6 +610,10 @@ export class GroupImageService {
         reason: source.kind === "url" ? "url-selected" : "no-image",
       };
     source.snapshotIdentity = getGroupImageSnapshotIdentity(source.metadata);
+    this.activeReads.set(
+      source.snapshotIdentity,
+      (this.activeReads.get(source.snapshotIdentity) ?? 0) + 1,
+    );
     const caller = new AbortController();
     const abort = () => caller.abort();
     options.signal?.addEventListener("abort", abort, { once: true });
@@ -726,6 +753,9 @@ export class GroupImageService {
         : groupImageUnavailable(error);
     } finally {
       if (undelivered) this.forget(undelivered);
+      const readers = this.activeReads.get(source.snapshotIdentity)! - 1;
+      if (readers === 0) this.activeReads.delete(source.snapshotIdentity);
+      else this.activeReads.set(source.snapshotIdentity, readers);
       options.signal?.removeEventListener("abort", abort);
       this.lifetime.signal.removeEventListener("abort", abort);
     }

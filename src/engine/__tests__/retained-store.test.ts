@@ -1,3 +1,4 @@
+import { bytesToHex } from "@noble/hashes/utils.js";
 import {
   createCommit,
   defaultCryptoProvider,
@@ -110,7 +111,7 @@ describe("RetainedHistoryStore (in-memory convergence window)", () => {
     expect(store.appliedCommitsBetween(0, 2)).toHaveLength(2);
   });
 
-  it("prunes states older than the rollback horizon", async () => {
+  it("retains recovery states until a durable checkpoint releases them", async () => {
     const { epoch0, epoch1, epoch2, addCommit, updateCommit } =
       await buildStoreWithHistory();
     const store = new RetainedHistoryStore(epoch0, HORIZON_1);
@@ -118,7 +119,14 @@ describe("RetainedHistoryStore (in-memory convergence window)", () => {
     store.record(epoch0, addCommit, epoch1); // tip 1, floor 0: nothing pruned
     expect(store.hasState(0)).toBe(true);
 
-    store.record(epoch1, updateCommit, epoch2); // tip 2, floor 1: epoch 0 pruned
+    store.record(epoch1, updateCommit, epoch2);
+    expect(store.hasState(0)).toBe(true);
+    store.commitRetention({
+      retainedTags: [epoch1, epoch2].map((state) =>
+        bytesToHex(state.confirmationTag),
+      ),
+      snapshots: new Map(),
+    });
     expect(store.hasState(0)).toBe(false);
     expect(store.anchorEpoch()).toBe(1);
     expect(store.appliedCommitsBetween(0, 1)).toHaveLength(0);

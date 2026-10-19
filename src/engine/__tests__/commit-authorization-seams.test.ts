@@ -4,10 +4,12 @@ import {
   type CiphersuiteImpl,
   createCommit,
   defaultCryptoProvider,
+  defaultCredentialTypes,
   defaultProposalTypes,
   getCiphersuiteImpl,
   joinGroup,
   nodeTypes,
+  type MlsContext,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -58,9 +60,9 @@ async function memberGroup() {
     "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
     defaultCryptoProvider,
   );
-  const context = {
+  const context: MlsContext = {
     cipherSuite: impl,
-    authService: { validateCredential: () => true },
+    authService: { validateCredential: async () => true },
   };
   const adminKp = await generateKeyPackage({
     credential: createCredential(adminPubkey),
@@ -124,6 +126,7 @@ async function stageForeignProposal(
       },
     },
   });
+  if (staged.kind !== "proposal") throw new Error("expected staged proposal");
   engine.confirmPublished(staged.pending);
 }
 
@@ -163,15 +166,17 @@ describe("outbound commit authorization seams", () => {
       (node, nodeIndex) =>
         node?.nodeType === nodeTypes.leaf &&
         nodeIndex !== localNodeIndex &&
+        node.leaf.credential.credentialType === defaultCredentialTypes.basic &&
+        "identity" in node.leaf.credential &&
         node.leaf.credential.identity.length === 32 &&
         bytesToHex(node.leaf.credential.identity) !== adminPubkey,
     );
     if (!unrelatedLeaf || unrelatedLeaf.nodeType !== nodeTypes.leaf)
       throw new Error("expected unrelated leaf");
     unrelatedLeaf.leaf.credential = {
-      credentialType: 1,
+      credentialType: defaultCredentialTypes.basic,
       identity: new Uint8Array(16),
-    } as typeof unrelatedLeaf.leaf.credential;
+    };
 
     const engine = new MarmotGroupEngine({
       state: memberState,

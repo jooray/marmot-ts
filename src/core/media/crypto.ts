@@ -28,7 +28,7 @@ const MLS_EXPORTER_LABEL = "marmot";
 const MLS_EXPORTER_CONTEXT = enc.encode("encrypted-media");
 
 /** The crypto-relevant subset of a {@link MediaAttachment}. */
-type MediaCryptoFields = Pick<
+export type MediaCryptoFields = Pick<
   MediaAttachment,
   "plaintextSha256" | "mediaType" | "filename"
 >;

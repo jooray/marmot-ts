@@ -37,6 +37,7 @@ import {
   mlsMessageEncoder,
   processMessage,
   unsafeTestingAuthenticationService,
+  wireformats,
 } from "ts-mls";
 import { describe, expect, it, vi } from "vitest";
 
@@ -118,6 +119,7 @@ describe("ordered proposal builders (D-07)", () => {
     const parent = engine.state;
     const result = await engine.send(intent);
     expect(result.kind).toBe("groupEvolution");
+    if (result.kind !== "groupEvolution") throw new Error("expected commit");
     if (result.kind !== "groupEvolution") throw new Error("expected commit");
     expect(calls).toEqual(["single", "array"]);
     expect(contexts[0]).toBe(contexts[1]);
@@ -329,6 +331,7 @@ async function stageAdminPolicyProposal(
       },
     },
   });
+  if (staged.kind !== "proposal") throw new Error("expected proposal");
   engine.confirmPublished(staged.pending);
   const [ref] = Object.keys(engine.state.unappliedProposals);
   if (ref === undefined) throw new Error("expected staged proposal reference");
@@ -520,6 +523,11 @@ async function buildAdmin1PerspectiveChain(
   const states: ClientState[] = [];
   let current = rootState;
   for (const message of commitMessages) {
+    if (
+      message.wireformat !== wireformats.mls_public_message &&
+      message.wireformat !== wireformats.mls_private_message
+    )
+      throw new Error("expected a framed commit message");
     const result = await processMessage({
       context: {
         cipherSuite: ctx.cipherSuite,
@@ -564,6 +572,7 @@ describe("send-seam commit legality (WIRE-03/CONV-01) — D-01/D-02/D-05..D-09",
     });
 
     expect(result.kind).toBe("groupEvolution");
+    if (result.kind !== "groupEvolution") throw new Error("expected commit");
     if (result.kind !== "groupEvolution")
       throw new Error("expected groupEvolution");
 
@@ -597,6 +606,7 @@ describe("send-seam commit legality (WIRE-03/CONV-01) — D-01/D-02/D-05..D-09",
     });
 
     expect(result.kind).toBe("groupEvolution");
+    if (result.kind !== "groupEvolution") throw new Error("expected commit");
     if (result.kind !== "groupEvolution")
       throw new Error("expected groupEvolution");
 
@@ -671,6 +681,7 @@ describe("send-seam commit legality (WIRE-03/CONV-01) — D-01/D-02/D-05..D-09",
     });
 
     expect(result.kind).toBe("groupEvolution");
+    if (result.kind !== "groupEvolution") throw new Error("expected commit");
     if (result.kind !== "groupEvolution")
       throw new Error("expected groupEvolution");
 
@@ -726,6 +737,7 @@ describe("send-seam commit legality (WIRE-03/CONV-01) — D-01/D-02/D-05..D-09",
     });
 
     expect(result.kind).toBe("groupEvolution");
+    if (result.kind !== "groupEvolution") throw new Error("expected commit");
     if (result.kind !== "groupEvolution")
       throw new Error("expected groupEvolution");
     expect(Object.keys(result).sort()).toEqual(
@@ -794,6 +806,7 @@ describe("selfUpdate seam commit legality (CR-03) — D-01/D-02/D-05/D-07", () =
         },
       },
     });
+    if (staged.kind !== "proposal") throw new Error("expected proposal");
     engine.confirmPublished(staged.pending);
 
     const beforeTag = bytesToHex(engine.state.confirmationTag);
@@ -830,10 +843,12 @@ describe("selfUpdate seam commit legality (CR-03) — D-01/D-02/D-05/D-07", () =
         },
       },
     });
+    if (staged.kind !== "proposal") throw new Error("expected proposal");
     engine.confirmPublished(staged.pending);
 
     const result = await engine.send({ kind: "selfUpdate" });
     expect(result.kind).toBe("selfUpdate");
+    if (result.kind !== "selfUpdate") throw new Error("expected self-update");
     expect(engine.lifecycle).toBe("PendingPublish");
   });
 
@@ -855,6 +870,7 @@ describe("selfUpdate seam commit legality (CR-03) — D-01/D-02/D-05/D-07", () =
         },
       },
     });
+    if (staged.kind !== "proposal") throw new Error("expected proposal");
     engine.confirmPublished(staged.pending);
     expect(Object.keys(engine.state.unappliedProposals).length).toBe(1);
 
@@ -887,11 +903,13 @@ describe("selfUpdate seam commit legality (CR-03) — D-01/D-02/D-05/D-07", () =
         remove: { removed: admin2Leaf as LeafIndex },
       },
     });
+    if (staged.kind !== "proposal") throw new Error("expected proposal");
     engine.confirmPublished(staged.pending);
     expect(Object.keys(engine.state.unappliedProposals).length).toBe(1);
 
     const result = await engine.send({ kind: "selfUpdate" });
     expect(result.kind).toBe("selfUpdate");
+    if (result.kind !== "selfUpdate") throw new Error("expected self-update");
 
     // Without the splice this commit would carry an admin key with no member
     // leaf in the resulting epoch — the admin-leaf-coupling violation every
@@ -914,6 +932,7 @@ describe("selfUpdate seam commit legality (CR-03) — D-01/D-02/D-05/D-07", () =
     const result = await engine.send({ kind: "selfUpdate" });
 
     expect(result.kind).toBe("selfUpdate");
+    if (result.kind !== "selfUpdate") throw new Error("expected self-update");
     expect(result.pending.kind).toBe("selfUpdate");
     expect(Number(result.pending.newState.groupContext.epoch)).toBe(
       beforeEpoch + 1,
@@ -964,7 +983,7 @@ describe("outbound exact-union actor authorization matrix", () => {
         ciphersuite: impl,
         peeler: testPeeler(impl),
       });
-      const proposal = {
+      const proposal: Proposal = {
         proposalType: appDataUpdateProposalType,
         appDataUpdate: {
           componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
@@ -1022,6 +1041,7 @@ describe("outbound exact-union actor authorization matrix", () => {
     });
 
     expect(result.kind).toBe("groupEvolution");
+    if (result.kind !== "groupEvolution") throw new Error("expected commit");
     expect(Number(result.pending.newState.groupContext.epoch)).toBe(
       Number(engine.state.groupContext.epoch) + 1,
     );

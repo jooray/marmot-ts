@@ -27,11 +27,10 @@ export const convergenceStatuses = {
   settled: "Settled",
   /** Candidate processing cannot safely continue without a repair path or missing retained material. */
   blocked: "Blocked",
-} as const;
+} as const satisfies Record<string, ConvergenceStatus>;
 
 /** A convergence status value. */
-export type ConvergenceStatus =
-  (typeof convergenceStatuses)[keyof typeof convergenceStatuses];
+export type ConvergenceStatus = "Syncing" | "Resolving" | "Settled" | "Blocked";
 
 /** The inputs from which {@link deriveConvergenceStatus} computes the status. */
 export interface ConvergenceStatusInput {

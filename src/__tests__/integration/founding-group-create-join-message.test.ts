@@ -26,11 +26,6 @@
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import { Rumor, unlockGiftWrap } from "applesauce-common/helpers/gift-wrap";
 import { getEventHash, type NostrEvent } from "applesauce-core/helpers/event";
-import {
-  CiphersuiteImpl,
-  defaultCryptoProvider,
-  getCiphersuiteImpl,
-} from "ts-mls";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createApplicationMessageIntent } from "../../client/group/application-message.js";
@@ -54,7 +49,6 @@ const RELAYS = ["wss://mock-relay.test"];
 describe("FOUND-05: founding group creation, joining, and first message (positive control)", () => {
   let adminAccount: PrivateKeyAccount<any>;
   let inviteeAccounts: PrivateKeyAccount<any>[];
-  let ciphersuite: CiphersuiteImpl;
   let mockNetwork: MockNetwork;
   let adminClient: MarmotClient;
   let inviteeClients: MarmotClient[];
@@ -65,11 +59,6 @@ describe("FOUND-05: founding group creation, joining, and first message (positiv
       PrivateKeyAccount.generateNew(),
       PrivateKeyAccount.generateNew(),
     ];
-
-    ciphersuite = await getCiphersuiteImpl(
-      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-      defaultCryptoProvider,
-    );
 
     mockNetwork = new MockNetwork(RELAYS);
 
@@ -105,13 +94,15 @@ describe("FOUND-05: founding group creation, joining, and first message (positiv
     const invitee1KeyPackageEvent = mockNetwork.events.find(
       (e) =>
         e.kind === ADDRESSABLE_KEY_PACKAGE_KIND && e.pubkey === invitee1Pubkey,
-    ) as NostrEvent;
+    );
     const invitee2KeyPackageEvent = mockNetwork.events.find(
       (e) =>
         e.kind === ADDRESSABLE_KEY_PACKAGE_KIND && e.pubkey === invitee2Pubkey,
-    ) as NostrEvent;
+    );
     expect(invitee1KeyPackageEvent).toBeDefined();
     expect(invitee2KeyPackageEvent).toBeDefined();
+    if (!invitee1KeyPackageEvent || !invitee2KeyPackageEvent)
+      throw new Error("expected both published KeyPackages");
 
     // Step 2: admin founding-creates the group in a single call — one Add
     // commit carrying both invitees, merged locally to epoch 1. Relays are

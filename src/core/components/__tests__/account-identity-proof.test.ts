@@ -22,6 +22,7 @@ import {
   getCiphersuiteImpl,
   makeAppDataDictionaryExtension,
   makeCustomExtension,
+  leafNodeSources,
   nodeTypes,
   type ClientState,
   type Credential,
@@ -30,6 +31,7 @@ import {
   type GroupContextExtension,
   type KeyPackage,
   type LeafNode,
+  type LeafNodeKeyPackage,
 } from "ts-mls";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -37,6 +39,7 @@ import {
   AuthorizationProofError,
   authorizationProofEventId,
   decodeAuthorizationProof,
+  type AuthorizationProofSigner,
 } from "../../authorization-proof.js";
 import { BinaryWriter } from "../../binary.js";
 import { createCredential } from "../../credential.js";
@@ -96,7 +99,9 @@ OTHER_SECRET_KEY[31] = 7;
 const ZERO_AUX = new Uint8Array(32);
 
 /** Signs `draft` with `secretKey` and the spec vector's all-zero aux randomness. */
-function signWith(secretKey: Uint8Array, draft: UnsignedEvent) {
+type ProofDraft = Parameters<AuthorizationProofSigner["signEvent"]>[0];
+
+function signWith(secretKey: Uint8Array, draft: ProofDraft) {
   const pubkey = bytesToHex(schnorr.getPublicKey(secretKey));
   const unsigned: UnsignedEvent = { ...draft, pubkey };
   const id = getEventHash(unsigned);
@@ -104,8 +109,8 @@ function signWith(secretKey: Uint8Array, draft: UnsignedEvent) {
   return { ...unsigned, id, sig };
 }
 
-const vectorSigner = {
-  signEvent: async (draft: UnsignedEvent) => signWith(SECRET_KEY_3, draft),
+const vectorSigner: AuthorizationProofSigner = {
+  signEvent: async (draft) => signWith(SECRET_KEY_3, draft),
 };
 
 /** Runs `thunk`, asserts it throws {@link AccountIdentityProofError}, and returns its reason. */
@@ -258,7 +263,7 @@ describe("produceAccountIdentityProof (spec signing test vector)", () => {
   });
 
   it("rejects an unknown ciphersuite with ciphersuite-mismatch before ever calling the signer", async () => {
-    const signEvent = vi.fn(async (draft: UnsignedEvent) =>
+    const signEvent = vi.fn(async (draft: ProofDraft) =>
       signWith(SECRET_KEY_3, draft),
     );
     const spySigner = { signEvent };
@@ -280,9 +285,8 @@ describe("produceAccountIdentityProof (spec signing test vector)", () => {
   });
 
   it("propagates the Phase 6 AuthorizationProofError unchanged when the signer signs under a different key", async () => {
-    const wrongKeySigner = {
-      signEvent: async (draft: UnsignedEvent) =>
-        signWith(OTHER_SECRET_KEY, draft),
+    const wrongKeySigner: AuthorizationProofSigner = {
+      signEvent: async (draft) => signWith(OTHER_SECRET_KEY, draft),
     };
     const reason = await expectAuthorizationProofReasonAsync(() =>
       produceAccountIdentityProof({
@@ -363,18 +367,23 @@ const VECTOR_LEAF_DICTIONARY = leafDictionary([
   ),
 ]);
 
-/** Builds a `LeafNode`-shaped fixture (cast; only the fields this module reads are real). */
+/** Builds a complete KeyPackage leaf with the proof fields under test. */
 function makeLeaf(overrides: {
   credential?: Credential;
   signaturePublicKey?: Uint8Array;
   extensions?: CustomExtension[];
-}): LeafNode {
+}): LeafNodeKeyPackage {
   return {
+    hpkePublicKey: new Uint8Array(32),
+    capabilities: defaultCapabilities(),
+    leafNodeSource: leafNodeSources.key_package,
+    lifetime: createDefaultKeyPackageLifetime(),
+    signature: new Uint8Array(64),
     credential:
       overrides.credential ?? createCredential(VECTOR_SIGNER_PUBKEY_HEX),
     signaturePublicKey: overrides.signaturePublicKey ?? KEY_00_1F,
     extensions: overrides.extensions ?? [VECTOR_LEAF_DICTIONARY],
-  } as unknown as LeafNode;
+  };
 }
 
 const VECTOR_LEAF = makeLeaf({});
@@ -1075,12 +1084,11 @@ describe("hasAccountIdentityProofMaterial", () => {
     ).toBe(true);
     expect(hasAccountIdentityProofMaterial(keyPackageWith([]))).toBe(false);
     // A proof-bearing leaf does not make the KeyPackage-level list report material.
-    expect(
-      hasAccountIdentityProofMaterial({
-        ...keyPackageWith([]),
-        leafNode: VECTOR_LEAF,
-      }),
-    ).toBe(false);
+    const proofBearingLeafOnly = {
+      ...keyPackageWith([]),
+      leafNode: VECTOR_LEAF,
+    } satisfies KeyPackage;
+    expect(hasAccountIdentityProofMaterial(proofBearingLeafOnly)).toBe(false);
   });
 });
 

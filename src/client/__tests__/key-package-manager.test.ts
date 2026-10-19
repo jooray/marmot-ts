@@ -20,7 +20,7 @@ import {
 } from "../../core/key-package-event.js";
 import { ADDRESSABLE_KEY_PACKAGE_KIND } from "../../core/protocol.js";
 import { MockNetwork } from "../../__tests__/helpers/mock-network.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import { generateKeyPackage } from "../../core/key-package.js";
 import { createCredential } from "../../core/credential.js";
 import { createDefaultKeyPackageLifetime } from "../../utils/timestamp.js";

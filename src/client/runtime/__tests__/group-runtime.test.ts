@@ -1,5 +1,5 @@
 import type { NostrEvent } from "applesauce-core/helpers/event";
-import type { Welcome, MlsWelcomeMessage } from "ts-mls";
+import type { MlsWelcomeMessage } from "ts-mls";
 import {
   appDataUpdateProposalType,
   defaultCryptoProvider,
@@ -40,10 +40,23 @@ import {
 import { serializeApplicationRumor } from "../../../core/group-message.js";
 import { NostrGroupPeeler } from "../../group/nostr-peeler.js";
 import { createChatRumor } from "../../group/application-message.js";
-import publishFailFixture from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/publish-fail.v1.json";
-import invitePublishFailFixture from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/invite-publish-fail.v1.json";
+import publishFailFixture from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/publish-fail.v1.json" with { type: "json" };
+import invitePublishFailFixture from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/invite-publish-fail.v1.json" with { type: "json" };
 
 const RELAYS = ["wss://relay.test"];
+
+/** Structurally complete Welcome; fanout mocks do not attempt MLS joining. */
+function welcomeMessage(): MlsWelcomeMessage {
+  return {
+    version: protocolVersions.mls10,
+    wireformat: wireformats.mls_welcome,
+    welcome: {
+      cipherSuite: 1,
+      secrets: [],
+      encryptedGroupInfo: new Uint8Array([1, 2, 3, 4]),
+    },
+  };
+}
 
 /** A fake envelope; the runtime only forwards it to the network. */
 const envelope = { id: "evt-1", kind: 445 } as unknown as NostrEvent;
@@ -80,22 +93,24 @@ function makeNetwork(
  * Builds a `deliverMany` implementation that runs the production method
  * (see the call below) against the fixture's `deliver` mock, so this
  * suite's Welcome-delivery assertions cannot drift from the real
- * per-recipient classification (CR-02). `deliverMany`'s only `this`
- * dependency is `deliver` (it calls `this.deliver` per recipient), so a
- * bare `{ deliver }` object stands in for a full `NostrWelcomeDelivery`
- * instance here.
+ * per-recipient classification (CR-02). A complete delivery instance
+ * supplies the signer and network, with only `deliver` replaced.
  */
 function makeDeliverManyFromDeliver(deliver: NostrWelcomeDelivery["deliver"]) {
-  return (options: {
-    welcome: Welcome;
-    author: string;
-    groupRelays: string[];
-    recipients: WelcomeRecipient[];
-  }) =>
-    NostrWelcomeDelivery.prototype.deliverMany.call(
-      { deliver } as unknown as NostrWelcomeDelivery,
-      options,
-    );
+  const delivery = makeWelcomeDelivery({ deliver });
+  return delivery.deliverMany.bind(delivery);
+}
+
+function makeWelcomeDelivery(
+  overrides: Partial<Pick<NostrWelcomeDelivery, "deliver" | "deliverMany">>,
+): NostrWelcomeDelivery {
+  return Object.assign(
+    new NostrWelcomeDelivery({
+      signer: testAccount(0).signer,
+      network: makeNetwork(async () => ackResponse()),
+    }),
+    overrides,
+  );
 }
 
 function makeRuntime(overrides: Partial<GroupRuntimeOptions> = {}) {
@@ -107,18 +122,28 @@ function makeRuntime(overrides: Partial<GroupRuntimeOptions> = {}) {
       to: 2,
     },
   ];
-  const confirmPublished = vi.fn(() => confirmedNotifications);
-  const publishFailed = vi.fn();
-  const save = vi.fn(async () => {});
-  const deliver = vi.fn(async () => ackResponse());
+  const confirmPublished = vi.fn<GroupRuntimeOptions["confirmPublished"]>(
+    () => confirmedNotifications,
+  );
+  const publishFailed = vi.fn<GroupRuntimeOptions["publishFailed"]>();
+  const save = vi.fn<GroupRuntimeOptions["save"]>(async () => {});
+  const deliver = vi.fn<NostrWelcomeDelivery["deliver"]>(async () =>
+    ackResponse(),
+  );
   const deliverMany = vi.fn(makeDeliverManyFromDeliver(deliver));
-  const groupData = { relays: RELAYS } as MarmotGroupView;
+  const groupData: MarmotGroupView = {
+    relays: RELAYS,
+    name: "Runtime fixture",
+    description: "Publish and delivery seam",
+    adminPubkeys: [testAccount(0).pubkey],
+    imageSource: { kind: "none" },
+  };
 
   const options: GroupRuntimeOptions = {
-    welcomeDelivery: {
+    welcomeDelivery: makeWelcomeDelivery({
       deliver,
       deliverMany,
-    } as unknown as NostrWelcomeDelivery,
+    }),
     getNetwork: () => makeNetwork(async () => ackResponse()),
     getRelays: () => RELAYS,
     getGroupRef: () => "group-ref",
@@ -240,7 +265,10 @@ describe("GroupRuntime publish acknowledgement", () => {
     if (update.kind !== "groupEvolution") throw new Error("expected commit");
     engine.confirmPublished(update.pending);
     expect(engine.state.groupContext.epoch).toBe(state.groupContext.epoch + 1n);
-    expect(getMarmotGroupView(engine.state).messageRetention).toBe(3600n);
+    const groupData = getMarmotGroupView(engine.state);
+    expect(groupData).not.toBeNull();
+    if (!groupData) throw new Error("expected current group data");
+    expect(groupData.messageRetention).toBe(3600n);
     wrap.mockClear();
 
     const [result] = await runtime.publishEffects({ publish: [work] });
@@ -439,7 +467,10 @@ describe("GroupRuntime publish failure", () => {
 
     await expect(
       runtime.publishWork(
-        commitWork({ welcome: {} as Welcome, welcomeRecipients: [recipient] }),
+        commitWork({
+          welcome: welcomeMessage(),
+          welcomeRecipients: [recipient],
+        }),
       ),
     ).rejects.toThrow(/Failed to publish commit/);
     expect(publishFailed).toHaveBeenCalledWith(pending);
@@ -509,12 +540,12 @@ describe("GroupRuntime commit rollback", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const deliverMany = vi.fn(async () => {
+    const deliverMany = vi.fn<NostrWelcomeDelivery["deliverMany"]>(async () => {
       await gate;
       return [];
     });
     const { runtime, publishFailed } = makeRuntime({
-      welcomeDelivery: { deliverMany } as unknown as NostrWelcomeDelivery,
+      welcomeDelivery: makeWelcomeDelivery({ deliverMany }),
       assertOpen: () => {
         if (closed) throw new Error("Group closed");
       },
@@ -522,7 +553,7 @@ describe("GroupRuntime commit rollback", () => {
     const operation = runtime.publishEffects({
       publish: [
         commitWork({
-          welcome: { welcome: {} as Welcome },
+          welcome: welcomeMessage(),
           welcomeRecipients: [recipient],
         }),
       ],
@@ -661,7 +692,7 @@ describe("GroupRuntime commit rollback", () => {
 // of the tests' shape, not a loosening of intent — see R-03 in
 // .planning/phases/10-founding-group-creation-via-welcome/10-CONTEXT.md.
 describe("GroupRuntime Welcome delivery", () => {
-  const welcome = { welcome: {} as Welcome };
+  const welcome = welcomeMessage();
 
   it("delivers a Welcome to each recipient after a successful commit", async () => {
     const { runtime, deliver } = makeRuntime();
@@ -694,16 +725,16 @@ describe("GroupRuntime Welcome delivery", () => {
 
   it("preserves confirmed notifications when Welcome delivery fails", async () => {
     const deliver = vi
-      .fn()
+      .fn<NostrWelcomeDelivery["deliver"]>()
       .mockResolvedValueOnce(ackResponse())
       .mockRejectedValueOnce(new Error("inbox unreachable"));
     const deliverMany = vi.fn(makeDeliverManyFromDeliver(deliver));
     const { runtime, confirmPublished, publishFailed, confirmedNotifications } =
       makeRuntime({
-        welcomeDelivery: {
+        welcomeDelivery: makeWelcomeDelivery({
           deliver,
           deliverMany,
-        } as unknown as NostrWelcomeDelivery,
+        }),
       });
 
     const second: WelcomeRecipient = { ...recipient, pubkey: "e".repeat(64) };
@@ -734,7 +765,9 @@ describe("GroupRuntime Welcome delivery", () => {
   });
 
   it("CR-02: an ordinary invite whose Welcome no relay acknowledged reports a failed outcome (real NostrWelcomeDelivery)", async () => {
-    const welcomePublish = vi.fn(async () => noAckResponse());
+    const welcomePublish = vi.fn<NostrNetworkInterface["publish"]>(async () =>
+      noAckResponse(),
+    );
     const welcomeNetwork: NostrNetworkInterface = {
       ...makeNetwork(welcomePublish),
       getUserInboxRelays: async () => ["wss://inbox.test"],
@@ -759,7 +792,7 @@ describe("GroupRuntime Welcome delivery", () => {
         cipherSuite: 1,
         secrets: [],
         encryptedGroupInfo: new Uint8Array([1, 2, 3, 4]),
-      } as Welcome,
+      },
     };
 
     const { runtime, confirmPublished, publishFailed } = makeRuntime({

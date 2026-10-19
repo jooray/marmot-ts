@@ -3,12 +3,18 @@
 // module specifiers to point at the vendored copy, and guards against dependency-confusion
 // or undeclared-import regressions. Run as part of `pnpm build` via `pnpm run vendor`.
 //
-// Uses only Node.js builtins so it works on Node 20+ without any project dependency.
+// Uses Node.js builtins and the already-declared TypeScript build dependency.
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  isForkSpecifier,
+  moduleReferences,
+  packageRoot,
+  rewriteModuleReferences,
+} from "./package-checks.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -151,11 +157,6 @@ function writeLicenseAndVersion() {
   fs.writeFileSync(path.join(VENDOR_DIR, "VERSION"), versionContents);
 }
 
-// Escape a string for safe inclusion inside a regex character class / literal match.
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 // Compute the relative specifier from a dist file to dist/vendor/ts-mls/index.js
 function relativeVendorSpecifier(fromFile) {
   const fromDir = path.dirname(fromFile);
@@ -178,30 +179,14 @@ function rewriteSpecifiers() {
     (f) => f.endsWith(".js") || f.endsWith(".d.ts"),
   );
 
-  const forkNameEscaped = escapeRegExp(FORK_NAME);
-  // Matches a bare fork specifier (exact name, no subpath) in either quote style,
-  // in `from "..."` / `from '...'` position or in `import("...")` / `import('...')` position.
-  const fromRe = new RegExp(`(from\\s+)(["'])${forkNameEscaped}\\2`, "g");
-  const importRe = new RegExp(
-    `(import\\(\\s*)(["'])${forkNameEscaped}\\2(\\s*\\))`,
-    "g",
-  );
-
   let rewriteCount = 0;
 
   for (const filePath of targetFiles) {
     const original = fs.readFileSync(filePath, "utf8");
     const specifier = relativeVendorSpecifier(filePath);
 
-    let changed = original;
-    changed = changed.replace(
-      fromRe,
-      (_m, fromKeyword, quote) => `${fromKeyword}${quote}${specifier}${quote}`,
-    );
-    changed = changed.replace(
-      importRe,
-      (_m, importOpen, quote, importClose) =>
-        `${importOpen}${quote}${specifier}${quote}${importClose}`,
+    const changed = rewriteModuleReferences(filePath, original, (name) =>
+      name === FORK_NAME ? specifier : undefined,
     );
 
     if (changed !== original) {
@@ -222,18 +207,14 @@ function guardA() {
     (f) => f.endsWith(".js") || f.endsWith(".d.ts"),
   );
 
-  const forkNameEscaped = escapeRegExp(FORK_NAME);
-  // Bare name, or bare name followed by a slash (subpath) - any quoted specifier form.
-  const leftoverRe = new RegExp(`["']${forkNameEscaped}(?:/[^"']*)?["']`, "g");
-
   const hits = [];
   for (const filePath of targetFiles) {
     const contents = fs.readFileSync(filePath, "utf8");
-    const lines = contents.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      leftoverRe.lastIndex = 0;
-      if (leftoverRe.test(lines[i])) {
-        hits.push(`${path.relative(REPO_ROOT, filePath)}:${i + 1}`);
+    for (const reference of moduleReferences(filePath, contents)) {
+      if (isForkSpecifier(reference.specifier, FORK_NAME)) {
+        hits.push(
+          `${path.relative(REPO_ROOT, filePath)}:${reference.line}:${reference.column}: "${reference.specifier}"`,
+        );
       }
     }
   }
@@ -261,30 +242,19 @@ function guardB() {
     (f) => f.endsWith(".js") || f.endsWith(".d.ts"),
   );
 
-  // Matches from "...", export ... from "...", import "..." (side-effect), and dynamic import("...")
-  const specifierRe =
-    /(?:from\s+|import\s*\(\s*|^\s*import\s+)(["'])([^"']+)\1/gm;
-
   const offenders = [];
   for (const filePath of vendorFiles) {
     const contents = fs.readFileSync(filePath, "utf8");
-    let match;
-    specifierRe.lastIndex = 0;
-    while ((match = specifierRe.exec(contents)) !== null) {
-      const specifier = match[2];
-      if (specifier.startsWith(".")) continue; // relative import, always fine
-
-      let pkgName;
-      if (specifier.startsWith("@")) {
-        const parts = specifier.split("/");
-        pkgName = parts.slice(0, 2).join("/");
-      } else {
-        pkgName = specifier.split("/")[0];
-      }
+    for (const { specifier, line, column } of moduleReferences(
+      filePath,
+      contents,
+    )) {
+      const pkgName = packageRoot(specifier);
+      if (pkgName === null) continue;
 
       if (!allowed.has(pkgName)) {
         offenders.push(
-          `${path.relative(REPO_ROOT, filePath)}: "${specifier}" (package "${pkgName}")`,
+          `${path.relative(REPO_ROOT, filePath)}:${line}:${column}: "${specifier}" (package "${pkgName}")`,
         );
       }
     }

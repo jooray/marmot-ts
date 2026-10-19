@@ -7,13 +7,20 @@ import {
   defaultProposalTypes,
   getCiphersuiteImpl,
   getAppDataDictionary,
+  leafNodeSources,
+  protocolVersions,
+  type CustomExtension,
+  type IncomingMessageCallback,
+  type LeafNodeKeyPackage,
+  type LeafIndex,
+  type Proposal,
   joinGroup,
   makeCustomExtension,
   unsafeTestingAuthenticationService,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
 
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import type { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import {
   makeLeafAppComponentsExtension,
@@ -22,6 +29,8 @@ import {
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
 import { createChatRumor } from "../../client/group/application-message.js";
 import { createCredential } from "../../core/credential.js";
+import { defaultCapabilities } from "../../core/default-capabilities.js";
+import { createDefaultKeyPackageLifetime } from "../../utils/timestamp.js";
 import { createGroup, createSimpleGroup } from "../../core/group.js";
 import { NostrGroupPeeler } from "../../client/group/nostr-peeler.js";
 import { messageRetentionEntry } from "../../core/components/dictionary.js";
@@ -63,7 +72,7 @@ function testPeeler(ciphersuite: CiphersuiteImpl): GroupPeeler<NostrEvent> {
 }
 
 async function createTestGroupState(
-  account: PrivateKeyAccount<any>,
+  account: ReturnType<typeof PrivateKeyAccount.fromKey>,
   ciphersuiteImpl: CiphersuiteImpl,
 ) {
   const credential = createCredential(account.pubkey);
@@ -138,6 +147,8 @@ describe("source-epoch expiration (app-components/message-retention-v1.md)", () 
         payload: serializeApplicationRumor(rumor),
       });
       expect(sent.kind).toBe("applicationMessage");
+      if (sent.kind !== "applicationMessage")
+        throw new Error("expected application message");
       expect(
         sent.envelope.tags.filter((tag) => tag[0] === "expiration"),
       ).toEqual(expiry === undefined ? [] : [["expiration", expiry]]);
@@ -161,6 +172,8 @@ describe("source-epoch expiration (app-components/message-retention-v1.md)", () 
     ];
     for (const payload of payloads) {
       const sent = await engine.send({ kind: "applicationMessage", payload });
+      if (sent.kind !== "applicationMessage")
+        throw new Error("expected application message");
       expect(
         sent.envelope.tags.filter((tag) => tag[0] === "expiration"),
       ).toEqual([]);
@@ -176,22 +189,23 @@ describe("source-epoch expiration (app-components/message-retention-v1.md)", () 
         remove: { removed: 0 as import("ts-mls").LeafIndex },
       },
     });
+    if (proposal.kind !== "proposal") throw new Error("expected proposal");
     expect(
       proposal.envelope.tags.filter((tag) => tag[0] === "expiration"),
     ).toEqual([]);
-    if (proposal.kind !== "proposal") throw new Error("expected proposal");
     engine.publishFailed(proposal.pending);
     const commit = await engine.send({
       kind: "commit",
       actorPubkey: account.pubkey,
       extraProposals: [],
     });
+    if (commit.kind !== "groupEvolution") throw new Error("expected commit");
     expect(
       commit.envelope.tags.filter((tag) => tag[0] === "expiration"),
     ).toEqual([]);
-    if (commit.kind !== "groupEvolution") throw new Error("expected commit");
     engine.publishFailed(commit.pending);
     const update = await engine.send({ kind: "selfUpdate" });
+    if (update.kind !== "selfUpdate") throw new Error("expected self-update");
     expect(
       update.envelope.tags.filter((tag) => tag[0] === "expiration"),
     ).toEqual([]);
@@ -323,7 +337,6 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
   it("rejects commit send from non-admin members", async () => {
     const adminAccount = testAccount(6);
     const nonAdminAccount = testAccount(9);
-    const adminPubkey = adminAccount.pubkey;
     const nonAdminPubkey = nonAdminAccount.pubkey;
     const impl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
@@ -474,25 +487,40 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
     const ciphersuiteId = 1;
     const mlsKey = new Uint8Array(32).fill(0xcd);
 
+    function buildLeaf(
+      account: ReturnType<typeof PrivateKeyAccount.fromKey>,
+      extensions: CustomExtension[],
+    ): LeafNodeKeyPackage {
+      return {
+        credential: createCredential(account.pubkey),
+        hpkePublicKey: new Uint8Array(32),
+        signaturePublicKey: mlsKey,
+        capabilities: defaultCapabilities(),
+        leafNodeSource: leafNodeSources.key_package,
+        lifetime: createDefaultKeyPackageLifetime(),
+        signature: new Uint8Array(64),
+        extensions,
+      };
+    }
+
     function buildIncomingAdd(
-      account: PrivateKeyAccount<any>,
-      extensions: readonly { extensionType: number }[],
-    ) {
+      account: ReturnType<typeof PrivateKeyAccount.fromKey>,
+      extensions: CustomExtension[],
+    ): Extract<Parameters<IncomingMessageCallback>[0], { kind: "commit" }> {
       return {
         kind: "commit",
-        senderLeafIndex: 0,
+        senderLeafIndex: 0 as LeafIndex,
         proposals: [
           {
             proposal: {
               proposalType: defaultProposalTypes.add,
               add: {
                 keyPackage: {
+                  version: protocolVersions.mls10,
                   cipherSuite: ciphersuiteId,
-                  leafNode: {
-                    credential: createCredential(account.pubkey),
-                    signaturePublicKey: mlsKey,
-                    extensions,
-                  },
+                  initKey: new Uint8Array(32),
+                  signature: new Uint8Array(64),
+                  leafNode: buildLeaf(account, extensions),
                   extensions: [],
                 },
               },
@@ -503,9 +531,18 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       };
     }
 
-    function buildCallback(account: PrivateKeyAccount<any>) {
+    // The policy adapter still handles legacy raw Proposal inputs at runtime.
+    // Only these compatibility controls cross the typed callback boundary.
+    function legacyStandalone(proposal: Proposal) {
+      const legacyInput: unknown = { kind: "proposal", proposal };
+      return legacyInput as Parameters<IncomingMessageCallback>[0];
+    }
+
+    function buildCallback(
+      account: ReturnType<typeof PrivateKeyAccount.fromKey>,
+    ) {
       return createAdminCommitPolicyCallback({
-        ratchetTree: [] as never,
+        ratchetTree: [],
         adminPubkeys: [account.pubkey],
         ciphersuiteId,
         onUnverifiableCommit: "retry",
@@ -529,7 +566,7 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
         makeLeafAppComponentsExtension(tampered),
       ]);
 
-      expect(callback(incoming as never)).toBe("reject");
+      expect(callback(incoming)).toBe("reject");
     });
 
     it("rejects an Add whose leaf carries only legacy 0xf2f1 material", () => {
@@ -542,7 +579,7 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
         }),
       ]);
 
-      expect(callback(incoming as never)).toBe("reject");
+      expect(callback(incoming)).toBe("reject");
     });
 
     it("D-08 (GRP-02/GRP-04): an Add with no proof material is rejected by the proof gate", () => {
@@ -553,7 +590,7 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       // validateAddProposalAccountIdentityProofs rejects an Add with no
       // 0x8009 proof material, so the callback returns "reject" directly
       // instead of falling through to the (now-unreachable) sender lookup.
-      expect(callback(incoming as never)).toBe("reject");
+      expect(callback(incoming)).toBe("reject");
     });
 
     it("D-09: a standalone Add proposal with a missing or tampered proof is rejected", async () => {
@@ -561,12 +598,9 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       const callback = buildCallback(account);
 
       const missing = buildIncomingAdd(account, []);
-      expect(
-        callback({
-          kind: "proposal",
-          proposal: missing.proposals[0]!.proposal,
-        } as never),
-      ).toBe("reject");
+      expect(callback(legacyStandalone(missing.proposals[0]!.proposal))).toBe(
+        "reject",
+      );
 
       const proof = await produceAccountIdentityProof({
         signer: account.signer,
@@ -580,12 +614,9 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       const forged = buildIncomingAdd(account, [
         makeLeafAppComponentsExtension(tampered),
       ]);
-      expect(
-        callback({
-          kind: "proposal",
-          proposal: forged.proposals[0]!.proposal,
-        } as never),
-      ).toBe("reject");
+      expect(callback(legacyStandalone(forged.proposals[0]!.proposal))).toBe(
+        "reject",
+      );
     });
 
     it("D-09/D-10: a standalone Add with a valid proof is accepted; a standalone Update with no resolvable sender is rejected (Phase 9 closes the D-10 deferral)", async () => {
@@ -602,12 +633,9 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       const valid = buildIncomingAdd(account, [
         makeLeafAppComponentsExtension(proof),
       ]);
-      expect(
-        callback({
-          kind: "proposal",
-          proposal: valid.proposals[0]!.proposal,
-        } as never),
-      ).toBe("accept");
+      expect(callback(legacyStandalone(valid.proposals[0]!.proposal))).toBe(
+        "accept",
+      );
 
       // UPD-04/D-10 (Phase 9): standalone Update admission is no longer
       // deferred to a later commit. This bare-object proposal carries no
@@ -616,13 +644,17 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       // rejects it outright as an unresolvable sender rather than accepting
       // it blanket, per D-10's reject-on-unresolvable-sender rule.
       expect(
-        callback({
-          kind: "proposal",
-          proposal: {
+        callback(
+          legacyStandalone({
             proposalType: defaultProposalTypes.update,
-            update: {},
-          },
-        } as never),
+            update: {
+              leafNode: {
+                ...buildLeaf(account, []),
+                leafNodeSource: leafNodeSources.update,
+              },
+            },
+          }),
+        ),
       ).toBe("reject");
     });
 
@@ -644,10 +676,9 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       const proposalWithSender = valid.proposals[0]!;
 
       wrapped.take();
-      const result = wrapped.callback({
-        kind: "proposal",
-        proposal: proposalWithSender.proposal,
-      } as never);
+      const result = wrapped.callback(
+        legacyStandalone(proposalWithSender.proposal),
+      );
       expect(result).toBe("accept");
       const captured = wrapped.take();
       expect(captured.proposals).toEqual([proposalWithSender.proposal]);
@@ -657,7 +688,7 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
 });
 
 describe("MarmotGroupEngine retained-history pruning (retained-history.md)", () => {
-  it("pins a staged commit's source epoch against horizon pruning, then prunes once published-failed", async () => {
+  it("pins a staged commit's source epoch and retains recovery until a durable checkpoint", async () => {
     const adminAccount = testAccount(6);
     const memberAccount = testAccount(9);
     const adminPubkey = adminAccount.pubkey;
@@ -762,18 +793,18 @@ describe("MarmotGroupEngine retained-history pruning (retained-history.md)", () 
 
     // Abandon the staged commit: returning to Stable permits one deterministic
     // continuation edge to apply the retained input. With horizon 1, epoch 1 is
-    // then unpinned and pruned once the tip reaches epoch 3.
+    // then unpinned, but remains usable until a settled durable checkpoint.
     engine.publishFailed(staged.pending);
     expect(engine.lifecycle).toBe("Stable");
     await engine.driveConvergence();
     expect(Number(engine.state.groupContext.epoch)).toBe(3);
     expect(engine.retainedConvergenceInputCount).toBe(0);
-    expect(retained.hasState(1)).toBe(false);
+    expect(retained.hasState(1)).toBe(true);
 
     // A further inbound commit advances normally from the resumed tip.
     await memberSelfUpdate();
     expect(Number(engine.state.groupContext.epoch)).toBe(4);
-    expect(retained.hasState(1)).toBe(false);
+    expect(retained.hasState(1)).toBe(true);
   });
 });
 

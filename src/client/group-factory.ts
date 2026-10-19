@@ -73,6 +73,7 @@ export type GroupFactoryOptions<
   verifyEvent?: VerifyEventMethod;
 };
 
+/** Options for creating a group through {@link GroupsManager.create}. */
 export type CreateGroupOptions = SimpleGroupOptions & {
   ciphersuite?: CiphersuiteName;
   /**

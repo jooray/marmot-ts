@@ -1,5 +1,4 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { EventSigner } from "applesauce-core";
 import {
   CiphersuiteImpl,
   createApplicationMessage,
@@ -53,7 +52,7 @@ const NETWORK: NostrNetworkInterface = {
 
 const MEMBER_ACCOUNT = testAccount(11);
 const MEMBER_PUBKEY = MEMBER_ACCOUNT.pubkey;
-const SIGNER = { getPublicKey: async () => MEMBER_PUBKEY } as EventSigner;
+const SIGNER = MEMBER_ACCOUNT.signer;
 
 /**
  * Builds a 2-member group at epoch 1, plus two competing commits from that
@@ -98,9 +97,10 @@ async function buildForkScenario(impl: CiphersuiteImpl) {
     ],
     ratchetTreeExtension: true,
   });
+  if (!welcome) throw new Error("Member Add commit did not produce a Welcome");
   const memberEpoch1 = await joinGroup({
     context: ctx,
-    welcome: welcome!.welcome ?? (welcome as never),
+    welcome: welcome.welcome,
     keyPackage: memberKp.publicPackage,
     privateKeys: memberKp.privatePackage,
     ratchetTree: undefined,
@@ -118,7 +118,7 @@ async function buildForkScenario(impl: CiphersuiteImpl) {
   });
   const digestA = commitDigest(encode(mlsMessageEncoder, commitA.commit));
   const digestB = commitDigest(encode(mlsMessageEncoder, commitB.commit));
-  const aWins = Buffer.compare(Buffer.from(digestA), Buffer.from(digestB)) < 0;
+  const aWins = bytesToHex(digestA) < bytesToHex(digestB);
   const lower = aWins ? commitA : commitB;
   const higher = aWins ? commitB : commitA;
 
@@ -203,6 +203,8 @@ describe("rewind history persistence across restart", () => {
     // "Restart": rehydrate the group through the real load path.
     const registry = new GroupRegistry({
       store,
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
       rewindStore,
       signer: SIGNER,
       network: NETWORK,
@@ -264,6 +266,8 @@ describe("rewind history persistence across restart", () => {
     // "Restart" through the real load path — and ingest NOTHING afterwards.
     const registry = new GroupRegistry({
       store,
+      ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+      lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
       rewindStore,
       signer: SIGNER,
       network: NETWORK,

@@ -6,7 +6,7 @@ import {
 } from "applesauce-core/helpers";
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import type { Rumor } from "applesauce-common/helpers/gift-wrap";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { InviteManager } from "../invite-manager.js";
 import type {
   ReceivedGiftWrap,
@@ -198,7 +198,7 @@ describe("InviteManager", () => {
       } as NostrEvent;
 
       let errorEmitted = false;
-      inviteManager.on("error", (err, eventId) => {
+      inviteManager.on("error", (_err, eventId) => {
         errorEmitted = true;
         expect(eventId).toBe("invalid");
       });
@@ -221,7 +221,7 @@ describe("InviteManager", () => {
       await inviteManager.ingestEvent(giftWrap);
 
       let errorEmitted = false;
-      inviteManager.on("error", (err, eventId) => {
+      inviteManager.on("error", (_err, eventId) => {
         errorEmitted = true;
         expect(eventId).toBe("test-id-1");
       });
@@ -402,17 +402,18 @@ describe("InviteManager", () => {
       const giftWrap = createMockGiftWrap("test-id-1", pubkey);
 
       let eventEmitted = false;
-      let emittedInvite: any = null;
+      const emittedInvites: ReceivedGiftWrap[] = [];
 
       inviteManager.on("received", (invite) => {
         eventEmitted = true;
-        emittedInvite = invite;
+        emittedInvites.push(invite);
       });
 
       await inviteManager.ingestEvent(giftWrap);
 
       expect(eventEmitted).toBe(true);
-      expect(emittedInvite.id).toBe(giftWrap.id);
+      expect(emittedInvites).toHaveLength(1);
+      expect(emittedInvites[0]!.id).toBe(giftWrap.id);
     });
 
     it("should emit processed when gift wrap is decrypted", async () => {

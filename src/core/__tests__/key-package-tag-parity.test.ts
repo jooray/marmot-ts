@@ -3,8 +3,8 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { decode, mlsMessageDecoder, wireformats } from "ts-mls";
 import { describe, expect, it } from "vitest";
 
-import lifetimeFixture from "../../__tests__/fixtures/key-package-lifetime-rust.json";
-import tagFixture from "../../__tests__/fixtures/key-package-tags-rust.json";
+import lifetimeFixture from "../../__tests__/fixtures/key-package-lifetime-rust.json" with { type: "json" };
+import tagFixture from "../../__tests__/fixtures/key-package-tags-rust.json" with { type: "json" };
 import {
   getListTag,
   getSingletonTagValue,

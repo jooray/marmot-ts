@@ -37,7 +37,7 @@ import { ConvergenceEffectLedger } from "../../client/group/wrapper-ledger.js";
 import type { SerializedClientState } from "../../core/client-state.js";
 import { deriveStateNotifications } from "../state-notifications.js";
 import { MarmotGroupEngine } from "../group-engine.js";
-import type { GroupPeeler } from "../types.js";
+import type { GroupPeeler, IngestResult } from "../types.js";
 
 const RELAY = "wss://relay.test";
 const CUSTOM_COMPONENT_ID = 0x9001;
@@ -112,7 +112,7 @@ async function twoMemberEpoch1Group() {
   });
   const memberEpoch1 = await joinGroup({
     context: ctx,
-    welcome: welcome!.welcome ?? (welcome as never),
+    welcome: welcome!.welcome,
     keyPackage: memberKp.publicPackage,
     privateKeys: memberKp.privatePackage,
     ratchetTree: undefined,
@@ -291,7 +291,7 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
     });
     const member1Epoch1 = await joinGroup({
       context: ctx,
-      welcome: welcome1!.welcome ?? (welcome1 as never),
+      welcome: welcome1!.welcome,
       keyPackage: member1Kp.publicPackage,
       privateKeys: member1Kp.privatePackage,
       ratchetTree: undefined,
@@ -330,15 +330,10 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
       peeler: testPeeler(impl),
     });
 
-    const results: { kind: string; notifications?: unknown }[] = [];
-    for await (const r of engine.ingest([addEvent])) results.push(r as never);
+    const results: IngestResult<NostrEvent>[] = [];
+    for await (const r of engine.ingest([addEvent])) results.push(r);
 
-    const processed = results.find((r) => r.kind === "processed") as
-      | {
-          kind: "processed";
-          notifications?: import("../state-notifications.js").StateNotification[];
-        }
-      | undefined;
+    const processed = results.find((r) => r.kind === "processed");
     expect(processed).toBeDefined();
     const notifications = processed!.notifications ?? [];
 
@@ -455,17 +450,11 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
       peeler: testPeeler(impl),
     });
 
-    const results: { kind: string; notifications?: unknown }[] = [];
-    for await (const r of engine.ingest([removeEvent]))
-      results.push(r as never);
+    const results: IngestResult<NostrEvent>[] = [];
+    for await (const r of engine.ingest([removeEvent])) results.push(r);
 
     expect(engine.state.groupActiveState.kind).not.toBe("removedFromGroup");
-    const processed = results.find((r) => r.kind === "processed") as
-      | {
-          kind: "processed";
-          notifications?: import("../state-notifications.js").StateNotification[];
-        }
-      | undefined;
+    const processed = results.find((r) => r.kind === "processed");
     expect(processed).toBeDefined();
     const notifications = processed!.notifications ?? [];
     const memberRemoved = notifications.find((n) => n.kind === "memberRemoved");
@@ -509,15 +498,10 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
       peeler: testPeeler(impl),
     });
 
-    const results: { kind: string; notifications?: unknown }[] = [];
-    for await (const r of engine.ingest([event])) results.push(r as never);
+    const results: IngestResult<NostrEvent>[] = [];
+    for await (const r of engine.ingest([event])) results.push(r);
 
-    const processed = results.find((r) => r.kind === "processed") as
-      | {
-          kind: "processed";
-          notifications?: import("../state-notifications.js").StateNotification[];
-        }
-      | undefined;
+    const processed = results.find((r) => r.kind === "processed");
     expect(processed).toBeDefined();
     const notifications = processed!.notifications ?? [];
     const componentChanged = notifications.filter(
@@ -681,13 +665,8 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
     expect(Number(engine.state.groupContext.epoch)).toBe(2);
 
     // The winning competitor arrives late, forcing a real rewind.
-    const results: {
-      kind: string;
-      commitDigest?: Uint8Array;
-      withdrawn?: import("../state-notifications.js").StateNotification[];
-    }[] = [];
-    for await (const r of engine.ingest([winnerEvent]))
-      results.push(r as never);
+    const results: IngestResult<NostrEvent>[] = [];
+    for await (const r of engine.ingest([winnerEvent])) results.push(r);
 
     const invalidations = results.filter((r) => r.kind === "stateInvalidated");
     expect(invalidations).toHaveLength(1);
@@ -776,11 +755,7 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
       expect.arrayContaining(["epochAdvanced", "componentChanged"]),
     );
 
-    const results: {
-      kind: string;
-      commitDigest?: Uint8Array;
-      withdrawn?: import("../state-notifications.js").StateNotification[];
-    }[] = [];
+    const results: IngestResult<NostrEvent>[] = [];
     for await (const result of engine.ingest([
       await createGroupEvent({
         message: winner.commit,
@@ -788,7 +763,7 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
         ciphersuite: impl,
       }),
     ])) {
-      results.push(result as never);
+      results.push(result);
     }
 
     const invalidatedIndex = results.findIndex(
@@ -796,6 +771,8 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
     );
     expect(invalidatedIndex).toBeGreaterThanOrEqual(0);
     const invalidated = results[invalidatedIndex];
+    if (invalidated.kind !== "stateInvalidated")
+      throw new Error("expected attributed invalidation");
     expect(invalidated.commitDigest).toEqual(localDigest);
     expect(
       invalidated.withdrawn?.map((notification) => notification.kind),
@@ -901,26 +878,10 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
     expect(stateInvalidatedIndex).toBeLessThan(invalidatedIndex);
   });
 
-  it("clears the persisted removed-inactive marker when ingest yields a stateInvalidated result whose withdrawn set contains selfRemoved (CONV-03)", async () => {
-    // This test targets ONLY the marker-clearing wiring Task 3 adds to
-    // `MarmotGroup#ingest` — the `result.kind === "stateInvalidated"` branch
-    // that calls `#clearRemovalMarker()` when `withdrawn` contains a
-    // `selfRemoved` entry. The engine-level mechanics of DERIVING and
-    // WITHDRAWING notifications (including `selfRemoved`) at a real rewind are
-    // proven end-to-end by the two tests above, driven by a real
-    // `MarmotGroupEngine`. Composing BOTH into one scenario is not currently
-    // reachable: `ForkRecovery`'s branch exploration deduplicates candidates
-    // by resulting `confirmationTag` (`fork-recovery.ts`'s `seen` set), and a
-    // `removedFromGroup` tombstone's `confirmationTag` is identical to its
-    // parent's (ts-mls has no legitimate new transcript hash to compute for
-    // the party being removed) — so a commit that would remove the *observing*
-    // party can never become a distinct, explorable candidate via pool-replay
-    // fork recovery, and the direct in-order removal branch deliberately skips
-    // retained-history/tree recording ("retained history is moot" once
-    // removed), so the tree never learns of it for a later tree-fed
-    // reconvergence either. This is a pre-existing engine/ts-mls interaction,
-    // not something this plan's tasks touch.
-    const { memberEpoch1, memberPubkey } = await twoMemberEpoch1Group();
+  it("keeps a legacy removal marker when ingest reports an unattributed selfRemoved withdrawal", async () => {
+    // A volatile withdrawal is not durable recovery authority. The real positive
+    // removal lifecycle is covered by client/group/removal-recovery.test.ts.
+    const { memberEpoch1 } = await twoMemberEpoch1Group();
 
     const store = new InMemoryKeyValueStore<SerializedClientState>();
     const removedMarkerStore = new InMemoryKeyValueStore<boolean>();
@@ -950,17 +911,7 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
         kind: "selfRemoved",
         commitDigest: new Uint8Array(32),
       };
-    (
-      group.session as unknown as {
-        ingest: (events: NostrEvent[]) => AsyncGenerator<{
-          kind: "stateInvalidated";
-          commitDigest: Uint8Array;
-          forkEpoch: number;
-          withdrawn: import("../state-notifications.js").StateNotification[];
-          disposition: { kind: "invalidated" };
-        }>;
-      }
-    ).ingest = async function* () {
+    group.session.ingest = async function* () {
       yield {
         kind: "stateInvalidated",
         commitDigest: new Uint8Array(32),
@@ -972,32 +923,11 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
 
     for await (const _ of group.ingest([])) void _;
 
-    expect(await removedMarkerStore.getItem(removedMarkerKey)).toBeFalsy();
+    expect(await removedMarkerStore.getItem(removedMarkerKey)).toBe(true);
   });
 
-  /**
-   * CR-06 regression, and the load-time twin of the `ingest` test above.
-   *
-   * `MarmotGroupEngine.reconvergeFromHistory` used to drain
-   * `#reconvergeFromTree` into `void _`, and `GroupSession.reconverge` exposed
-   * only `Promise<void>`, so every `stateInvalidated` a load-time rewind
-   * produced was discarded before `MarmotGroup` could see it. The documented
-   * "called automatically on load" path could therefore NEVER clear the
-   * removed-inactive marker: a client removed on a losing fork that restarts
-   * and re-converges onto a branch where it is still a member came back with
-   * canonical membership restored and a stale `marker = true`, silently
-   * suppressing its next genuine removal.
-   *
-   * Composing a real removal into a real tree-fed rewind is not reachable for
-   * the same pre-existing engine/ts-mls reason the `ingest` test above
-   * documents (a tombstone's `confirmationTag` equals its parent's, so a
-   * commit that removes the observing party never becomes a distinct
-   * explorable candidate). This asserts the wiring the fix adds: whatever the
-   * session's reconverge reports is routed through the same marker-clearing
-   * branch `ingest` uses.
-   */
-  it("clears the persisted removed-inactive marker when reconverge reports a selfRemoved withdrawal (CONV-03, CR-06)", async () => {
-    const { memberEpoch1, memberPubkey } = await twoMemberEpoch1Group();
+  it("keeps a legacy removal marker when reconverge reports an unattributed selfRemoved withdrawal", async () => {
+    const { memberEpoch1 } = await twoMemberEpoch1Group();
 
     const store = new InMemoryKeyValueStore<SerializedClientState>();
     const removedMarkerStore = new InMemoryKeyValueStore<boolean>();
@@ -1023,11 +953,7 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
         commitDigest: new Uint8Array(32),
       };
     let reconvergeCalls = 0;
-    (
-      group.session as unknown as {
-        reconverge: () => Promise<unknown[]>;
-      }
-    ).reconverge = async () => {
+    group.session.reconverge = async () => {
       reconvergeCalls++;
       return [
         {
@@ -1043,7 +969,7 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
     await group.reconverge();
 
     expect(reconvergeCalls).toBe(1);
-    expect(await removedMarkerStore.getItem(removedMarkerKey)).toBeFalsy();
+    expect(await removedMarkerStore.getItem(removedMarkerKey)).toBe(true);
   });
 
   /**
@@ -1210,9 +1136,8 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
       ciphersuite: impl,
     });
 
-    const results: { kind: string; reason?: string }[] = [];
-    for await (const r of engine.ingest([competitorEvent]))
-      results.push(r as never);
+    const results: IngestResult<NostrEvent>[] = [];
+    for await (const r of engine.ingest([competitorEvent])) results.push(r);
 
     expect(results.some((r) => r.kind === "stateInvalidated")).toBe(false);
     // The canonical branch is unaffected — nothing below the retained anchor
@@ -1285,12 +1210,9 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
       ciphersuite: impl,
     });
 
-    const results: {
-      kind: string;
-      notifications?: { kind: string; from?: number; to?: number }[];
-    }[] = [];
+    const results: IngestResult<NostrEvent>[] = [];
     for await (const r of engine.ingest([sibAEvent, sibBEvent]))
-      results.push(r as never);
+      results.push(r);
 
     // The two-commit branch outscores our one-commit branch on depth, so the
     // rewind really does apply both links.
@@ -1303,11 +1225,13 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
       (r) => r.kind === "processed" && r.notifications !== undefined,
     );
     expect(rewound).toBeDefined();
+    if (rewound?.kind !== "processed")
+      throw new Error("expected processed rewind");
 
     // Both epoch transitions are reported: 1 -> 2' from the first link and
     // 2' -> 3' from the tip. Before the fix only the second was present, so a
     // caller sitting at epoch 1 was told the group went from 2 to 3.
-    const epochAdvances = (rewound!.notifications ?? [])
+    const epochAdvances = (rewound.notifications ?? [])
       .filter((n) => n.kind === "epochAdvanced")
       .map((n) => [n.from, n.to]);
     expect(epochAdvances).toEqual([

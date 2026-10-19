@@ -173,8 +173,12 @@ function decodeMediaImetaTag(tag: string[]): MediaAttachment {
  * tag is not a valid `encrypted-media-v1` attachment.
  *
  * A `null` result means the media reference is invalid and MUST be dropped (the
- * containing message should be dropped too for a host-safety failure). See
- * {@link decodeMediaImetaTag} for the exact conditions.
+ * containing message should be dropped too for a host-safety failure). The
+ * internal `decodeMediaImetaTag` rejects wrong/legacy/missing versions,
+ * `blurhash`, duplicated single-occurrence fields, malformed hashes or nonce,
+ * missing required fields, absent or malformed locators, and unsafe
+ * `blossom-v1` hosts. Locator fetchability against group policy is checked
+ * separately by {@link selectFetchableLocators}.
  *
  * @param tag - A raw `imeta` tag array from a Nostr event
  */

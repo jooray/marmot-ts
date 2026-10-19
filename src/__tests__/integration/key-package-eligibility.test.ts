@@ -13,11 +13,11 @@ import { SerializedClientState } from "../../core/client-state.js";
 import { ADDRESSABLE_KEY_PACKAGE_KIND } from "../../core/protocol.js";
 import { unixNow } from "../../utils/nostr.js";
 import { MockNetwork } from "../helpers/mock-network.js";
-import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 
 describe("KeyPackage eligibility (group.evaluateKeyPackage)", () => {
-  let adminAccount: PrivateKeyAccount<any>;
-  let inviteeAccount: PrivateKeyAccount<any>;
+  let adminAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
+  let inviteeAccount: ReturnType<typeof PrivateKeyAccount.generateNew>;
   let ciphersuite: CiphersuiteImpl;
   let mockNetwork: MockNetwork;
   let adminClient: MarmotClient;
@@ -59,7 +59,9 @@ describe("KeyPackage eligibility (group.evaluateKeyPackage)", () => {
     });
     const keyPackageEvent = mockNetwork.events.find(
       (e) => e.kind === ADDRESSABLE_KEY_PACKAGE_KIND,
-    ) as NostrEvent;
+    );
+    if (!keyPackageEvent)
+      throw new Error("Invitee KeyPackage was not published");
     const adminGroup = await adminClient.groups.create("Test Group", {
       adminPubkeys: [adminPubkey],
       relays: ["wss://mock-relay.test"],

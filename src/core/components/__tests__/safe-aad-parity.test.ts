@@ -5,11 +5,12 @@ import {
   getAppDataDictionary,
   getCiphersuiteImpl,
   makeAppDataDictionaryExtension,
+  makeCustomExtension,
   type GroupContextExtension,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
 
-import fixtureJson from "../../../__tests__/fixtures/safe-aad-rust.json";
+import fixtureJson from "../../../__tests__/fixtures/safe-aad-rust.json" with { type: "json" };
 import { createCredential } from "../../credential.js";
 import { defaultCapabilities } from "../../default-capabilities.js";
 import { generateKeyPackage } from "../../key-package.js";
@@ -70,6 +71,8 @@ describe("MDK SafeAAD parity", () => {
       componentEntry(SAFE_AAD_COMPONENT_ID, safeAad),
     ]);
     expect(fixture.dictionary_projection).toContain("SafeAAD entry only");
+    expect(fixture.dictionary_hex).toBe("0400020100");
+    expect(fixture.safe_aad_hex).toBe("00");
     expect(bytesToHex(stableProjection.extensionData)).toBe(
       fixture.dictionary_hex,
     );
@@ -118,10 +121,10 @@ describe("MDK SafeAAD parity", () => {
   it("detects a one-byte dictionary mutation", () => {
     const encoded = hexToBytes(fixture.dictionary_hex);
     encoded[0] += 1;
-    const mutated = {
+    const mutated = makeCustomExtension({
       extensionType: appDataDictionaryExtensionType,
       extensionData: encoded,
-    } as GroupContextExtension;
+    });
     expect(() => getAppDataDictionary([mutated])).toThrow();
     expect(bytesToHex(encoded)).not.toBe(fixture.dictionary_hex);
   });

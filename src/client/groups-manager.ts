@@ -247,8 +247,8 @@ export type GroupsManagerEvents<
 
 /**
  * Orchestrates the lifecycle of {@link MarmotGroup} instances. Delegates
- * in-memory caching and store hydration to a {@link GroupRegistry} and group
- * construction to a {@link GroupFactory}, layering the public lifecycle events
+ * in-memory caching and store hydration to an internal `GroupRegistry` and group
+ * construction to an internal `GroupFactory`, layering the public lifecycle events
  * (created/imported/joined/destroyed/left) and the send/ingest facade on top.
  */
 export class GroupsManager<

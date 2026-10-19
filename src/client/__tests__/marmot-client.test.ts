@@ -10,7 +10,7 @@ import {
 import { createCredential } from "../../core/credential.js";
 import { createSimpleGroup } from "../../core/group.js";
 import { generateKeyPackage } from "../../core/key-package.js";
-import { StoredKeyPackage } from "../key-package-manager.js";
+import type { StoredKeyPackage } from "../key-package-manager.js";
 import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import { MockNetwork } from "../../__tests__/helpers/mock-network.js";
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
@@ -117,8 +117,8 @@ describe("admin pubkey deduplication — MarmotClient.createGroup", () => {
     const mockNetwork = new MockNetwork();
 
     const client = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore(),
-      keyPackageStore: new InMemoryKeyValueStore(),
+      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+      keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: account.signer,
       network: mockNetwork,
     });
@@ -144,8 +144,8 @@ describe("admin pubkey deduplication — MarmotClient.createGroup", () => {
     const mockNetwork = new MockNetwork();
 
     const client = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore(),
-      keyPackageStore: new InMemoryKeyValueStore(),
+      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+      keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: account.signer,
       network: mockNetwork,
     });
@@ -171,8 +171,8 @@ describe("admin pubkey deduplication — MarmotClient.createGroup", () => {
     const mockNetwork = new MockNetwork();
 
     const client = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore(),
-      keyPackageStore: new InMemoryKeyValueStore(),
+      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+      keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: account.signer,
       network: mockNetwork,
     });
@@ -196,9 +196,9 @@ describe("MarmotClient ingest-state persistence capability", () => {
     const account = PrivateKeyAccount.generateNew();
     const ingestStateStore = new InMemoryKeyValueStore<Uint8Array>();
     const client = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore(),
+      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
       ingestStateStore,
-      keyPackageStore: new InMemoryKeyValueStore(),
+      keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: account.signer,
       network: new MockNetwork(),
     });
@@ -219,7 +219,7 @@ describe("MarmotClient ingest-state persistence capability", () => {
       new MarmotClient({
         groupStateStore: store,
         ingestStateStore,
-        keyPackageStore: new InMemoryKeyValueStore(),
+        keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
         signer: account.signer,
         network: new MockNetwork(),
       });
@@ -239,8 +239,8 @@ describe("MarmotClient ingest-state persistence capability", () => {
   it("shares one explicitly ephemeral fallback across groups", async () => {
     const account = PrivateKeyAccount.generateNew();
     const client = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore(),
-      keyPackageStore: new InMemoryKeyValueStore(),
+      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+      keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: account.signer,
       network: new MockNetwork(),
     });
@@ -270,7 +270,7 @@ describe("MarmotClient lifecycle persistence", () => {
       new MarmotClient({
         groupStateStore: store,
         lifecycleStore,
-        keyPackageStore: new InMemoryKeyValueStore(),
+        keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
         signer: account.signer,
         network: new MockNetwork(),
       });
@@ -300,7 +300,7 @@ describe("MarmotClient lifecycle persistence", () => {
     const groupStateStore = new InMemoryKeyValueStore<SerializedClientState>();
     const client = new MarmotClient({
       groupStateStore,
-      keyPackageStore: new InMemoryKeyValueStore(),
+      keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: account.signer,
       network: new MockNetwork(),
     });
@@ -309,10 +309,11 @@ describe("MarmotClient lifecycle persistence", () => {
     });
     const marker = new Uint8Array([1, 2, 3]);
 
-    await group.session.lifecycleStore.setItem(
-      `${group.idStr}/disband/request`,
-      marker,
-    );
+    const lifecycleStore = group.session.lifecycleStore;
+    expect(lifecycleStore).toBeDefined();
+    if (!lifecycleStore)
+      throw new Error("expected the default lifecycle store");
+    await lifecycleStore.setItem(`${group.idStr}/disband/request`, marker);
 
     expect(
       await groupStateStore.getItem(`${group.idStr}/disband/request`),

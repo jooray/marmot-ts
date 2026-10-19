@@ -1,4 +1,4 @@
-import fixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/deferred-tick-catchup.v1.json";
+import fixture from "../../../refs/mdk/crates/cgka-conformance-simulator/vectors/deferred-tick-catchup.v1.json" with { type: "json" };
 import {
   createCommit,
   defaultCryptoProvider,
@@ -20,6 +20,125 @@ import { MockNetwork } from "../helpers/mock-network.js";
 import { MarmotConformanceSubject, parseMdkScenarioStep } from "./subject.js";
 
 const CLIENTS = ["alice", "bob", "carol", "dave"] as const;
+type Client = (typeof CLIENTS)[number];
+
+type ExpectedOutcome =
+  | {
+      type: "client_state";
+      client: Client;
+      epoch: number;
+      member_count: number;
+      received_payloads: string[];
+    }
+  | { type: "group_profile"; client: Client; name: string; description: string }
+  | {
+      type: "pending_resolution";
+      client: Client;
+      step_index: number;
+      pending: string;
+      resolution: "confirmed";
+    }
+  | {
+      type: "clients_converged";
+      clients: Client[];
+      epoch: number;
+      member_count: number;
+    }
+  | { type: "no_pending_work"; clients: Client[] };
+
+function requireClient(value: unknown): Client {
+  switch (value) {
+    case "alice":
+    case "bob":
+    case "carol":
+    case "dave":
+      return value;
+    default:
+      throw new Error(`Unknown fixture actor: ${String(value)}`);
+  }
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Expected fixture text");
+  return value;
+}
+
+function requireCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error("Expected a nonnegative fixture count");
+  return value;
+}
+
+function requireStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("Expected fixture text list");
+  return value.map(requireString);
+}
+
+function validateExpectedOutcome(value: unknown): ExpectedOutcome {
+  if (typeof value !== "object" || value === null || !("type" in value))
+    throw new Error("Expected a discriminated fixture outcome");
+  if (
+    value.type === "client_state" &&
+    "client" in value &&
+    "epoch" in value &&
+    "member_count" in value &&
+    "received_payloads" in value
+  )
+    return {
+      type: value.type,
+      client: requireClient(value.client),
+      epoch: requireCount(value.epoch),
+      member_count: requireCount(value.member_count),
+      received_payloads: requireStrings(value.received_payloads),
+    };
+  if (
+    value.type === "group_profile" &&
+    "client" in value &&
+    "name" in value &&
+    "description" in value
+  )
+    return {
+      type: value.type,
+      client: requireClient(value.client),
+      name: requireString(value.name),
+      description: requireString(value.description),
+    };
+  if (
+    value.type === "pending_resolution" &&
+    "client" in value &&
+    "step_index" in value &&
+    "pending" in value &&
+    "resolution" in value &&
+    value.resolution === "confirmed"
+  )
+    return {
+      type: value.type,
+      client: requireClient(value.client),
+      step_index: requireCount(value.step_index),
+      pending: requireString(value.pending),
+      resolution: value.resolution,
+    };
+  if (
+    value.type === "clients_converged" &&
+    "clients" in value &&
+    "epoch" in value &&
+    "member_count" in value
+  )
+    return {
+      type: value.type,
+      clients: requireStrings(value.clients).map(requireClient),
+      epoch: requireCount(value.epoch),
+      member_count: requireCount(value.member_count),
+    };
+  if (value.type === "no_pending_work" && "clients" in value)
+    return {
+      type: value.type,
+      clients: requireStrings(value.clients).map(requireClient),
+    };
+  throw new Error(`Invalid fixture outcome: ${String(value.type)}`);
+}
+
+const expectedOutcomes = fixture.expected_outcomes.map(validateExpectedOutcome);
 
 describe("deterministic offline catchup pressure", () => {
   it("executes the complete pinned scenario with distinct production actors", async () => {
@@ -81,7 +200,7 @@ describe("deterministic offline catchup pressure", () => {
         add: { keyPackage: packages.get(client)!.publicPackage },
       })),
     });
-    const states = new Map<string, ClientState>([["alice", add.newState]]);
+    const states = new Map<Client, ClientState>([["alice", add.newState]]);
     for (const client of CLIENTS.slice(1)) {
       const keyPackage = packages.get(client)!;
       states.set(
@@ -101,7 +220,7 @@ describe("deterministic offline catchup pressure", () => {
 
     const network = new MockNetwork();
     network.autoDeliver = false;
-    const groups = new Map<string, MarmotGroup>();
+    const groups = new Map<Client, MarmotGroup>();
     for (const client of CLIENTS) {
       const group = new MarmotGroup(states.get(client)!, {
         store: new InMemoryKeyValueStore(),
@@ -149,13 +268,11 @@ describe("deterministic offline catchup pressure", () => {
     }
     expect(finalSnapshots).toBeDefined();
 
-    const expectedClients = fixture.expected_outcomes.filter(
+    const expectedClients = expectedOutcomes.filter(
       (
         outcome,
-      ): outcome is Extract<
-        (typeof fixture.expected_outcomes)[number],
-        { type: "client_state" }
-      > => outcome.type === "client_state",
+      ): outcome is Extract<ExpectedOutcome, { type: "client_state" }> =>
+        outcome.type === "client_state",
     );
     for (const expected of expectedClients) {
       const snapshot = finalSnapshots![expected.client]!;
@@ -165,7 +282,7 @@ describe("deterministic offline catchup pressure", () => {
         snapshot.application_outputs.map((output) => output.value),
       ).toEqual(expected.received_payloads);
     }
-    for (const expected of fixture.expected_outcomes.filter(
+    for (const expected of expectedOutcomes.filter(
       (outcome) => outcome.type === "group_profile",
     ))
       expect(groups.get(expected.client)!.groupData).toMatchObject({

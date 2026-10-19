@@ -17,6 +17,7 @@ import {
   getCiphersuiteImpl,
   GroupContextExtension,
   joinGroup,
+  leafNodeSources,
   makeAppDataDictionaryExtension,
   nodeTypes,
   type CiphersuiteImpl,
@@ -842,7 +843,12 @@ describe("validateCommitAccountIdentityProofs — replacement-leaf identity (UPD
     // senderLeafIndex for this bucket, never the payload.
     const updateProposal = {
       proposalType: defaultProposalTypes.update,
-      update: { leafNode: memberNode.leaf },
+      update: {
+        leafNode: {
+          ...memberNode.leaf,
+          leafNodeSource: leafNodeSources.update,
+        },
+      },
     } as unknown as Proposal;
 
     const outcome = validateCommitAccountIdentityProofs({
@@ -1629,7 +1635,10 @@ describe("validateUpdateProposalAccountIdentityProofs (UPD-04, D-09/D-10)", () =
       state: memberEpoch1,
       wireAsPublicMessage: true,
     });
-    if (message.publicMessage?.content.contentType !== contentTypes.proposal)
+    if (
+      !("publicMessage" in message) ||
+      message.publicMessage.content.contentType !== contentTypes.proposal
+    )
       throw new Error("expected a proposal-framed message");
     const updateProposal: Proposal = message.publicMessage.content.proposal;
 
@@ -1654,7 +1663,9 @@ describe("validateUpdateProposalAccountIdentityProofs (UPD-04, D-09/D-10)", () =
 
     const updateProposal: Proposal = {
       proposalType: defaultProposalTypes.update,
-      update: { leafNode: adminNode.leaf },
+      update: {
+        leafNode: { ...adminNode.leaf, leafNodeSource: leafNodeSources.update },
+      },
     };
 
     const violation = validateUpdateProposalAccountIdentityProofs(
@@ -1679,7 +1690,9 @@ describe("validateUpdateProposalAccountIdentityProofs (UPD-04, D-09/D-10)", () =
 
     const updateProposal: Proposal = {
       proposalType: defaultProposalTypes.update,
-      update: { leafNode: adminNode.leaf },
+      update: {
+        leafNode: { ...adminNode.leaf, leafNodeSource: leafNodeSources.update },
+      },
     };
 
     const violation = validateUpdateProposalAccountIdentityProofs(
@@ -1704,7 +1717,9 @@ describe("validateUpdateProposalAccountIdentityProofs (UPD-04, D-09/D-10)", () =
     const strippedLeaf = stripLeafAccountIdentityProof(adminNode.leaf);
     const updateProposal: Proposal = {
       proposalType: defaultProposalTypes.update,
-      update: { leafNode: strippedLeaf },
+      update: {
+        leafNode: { ...strippedLeaf, leafNodeSource: leafNodeSources.update },
+      },
     };
 
     const violation = validateUpdateProposalAccountIdentityProofs(
@@ -1736,7 +1751,12 @@ describe("validateUpdateProposalAccountIdentityProofs (UPD-04, D-09/D-10)", () =
     // genuine (validly-proofed) leaf — a fabricated identity swap.
     const updateProposal: Proposal = {
       proposalType: defaultProposalTypes.update,
-      update: { leafNode: memberNode.leaf },
+      update: {
+        leafNode: {
+          ...memberNode.leaf,
+          leafNodeSource: leafNodeSources.update,
+        },
+      },
     };
 
     const violation = validateUpdateProposalAccountIdentityProofs(
@@ -1990,7 +2010,10 @@ describe("UPD-03: removing 0x8009 support or data from a non-blank member leaf",
       state: adminEpoch1,
       wireAsPublicMessage: true,
     });
-    if (message.publicMessage?.content.contentType !== contentTypes.proposal)
+    if (
+      !("publicMessage" in message) ||
+      message.publicMessage.content.contentType !== contentTypes.proposal
+    )
       throw new Error("expected a proposal-framed message");
     const updateProposal = message.publicMessage.content.proposal;
     if (!("update" in updateProposal))
@@ -2046,7 +2069,10 @@ describe("UPD-03: removing 0x8009 support or data from a non-blank member leaf",
       state: adminEpoch1,
       wireAsPublicMessage: true,
     });
-    if (message.publicMessage?.content.contentType !== contentTypes.proposal)
+    if (
+      !("publicMessage" in message) ||
+      message.publicMessage.content.contentType !== contentTypes.proposal
+    )
       throw new Error("expected a proposal-framed message");
     const updateProposal = message.publicMessage.content.proposal;
     if (!("update" in updateProposal))
