@@ -5,6 +5,7 @@
 ### Fixed
 
 - Groups created before 0.7.0, with the app-data dictionary first in their GroupContext extensions, can now be renamed and have their admins, relays or other components changed without splitting off White Noise members. The first such commit by a marmot-ts admin also moves the dictionary last, so later updates need no repair. Groups that already split on an earlier update are not recovered.
+- Refuse to invite (or found a group with) a KeyPackage whose leaf does not advertise every app component the group requires, or a required agent-text-stream role. MDK members reject such an Add commit, so the group forked: marmot-ts members moved to the next epoch and White Noise members did not. `evaluateKeyPackageForGroup()` now reports missing app components too, and the check is exported as `missingGroupRequirements()`.
 
 ## 0.7.0
 
@@ -110,7 +111,6 @@
 - Validate member identity proofs during sends, ingestion, and fork recovery, preventing invalid membership changes from being accepted.
 - Authorize commits against their parent state, including during fork recovery and when an admin is demoted earlier in an ingestion batch.
 - Keep admin restrictions enforced when optional group metadata is malformed, and reject invalid group component updates before applying them.
-- Refuse to invite (or found a group with) a KeyPackage whose leaf does not advertise every app component the group requires, or a required agent-text-stream role. MDK members reject such an Add commit, so the group forked: marmot-ts members moved to the next epoch and White Noise members did not. `evaluateKeyPackageForGroup()` now reports missing app components too, and the check is exported as `missingGroupRequirements()`.
 
 ### Breaking changes
 
