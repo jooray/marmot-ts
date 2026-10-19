@@ -6,6 +6,7 @@
 
 - Reject `app_components` lists whose ids are not in ascending order, matching MDK, so marmot-ts and White Noise members agree on which GroupContexts, LeafNodes and KeyPackages are valid.
 - Enforce the spec's 16-relay limit on Nostr routing state when encoding and decoding. Larger relay lists made Welcomes unjoinable and routing updates fail for White Noise members. The limit is exported as `NOSTR_ROUTING_MAX_RELAYS`.
+- Group avatar URLs on localhost or private-network hosts are now valid group state, as the spec requires and MDK accepts. Previously marmot-ts members rejected a White Noise commit setting such an avatar and fell an epoch behind. Call the new `rejectUnsafeGroupAvatarContactUrl()` before fetching or rendering an avatar.
 
 ## 0.6.0
 
