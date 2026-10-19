@@ -53,6 +53,7 @@ const client = new MarmotClient({
 - **`historyFactory`** - Per-group message history backend factory (see [History](/client/history)).
 - **`capabilities`** - MLS `Capabilities` advertised on key packages; defaults to `defaultCapabilities()`.
 - **`cryptoProvider`** - Override the MLS crypto provider.
+- **`getSignatureKeyPair`** - Load this installation's persisted leaf signature key pair for the given ciphersuite, so every published KeyPackage reuses it. Init and encryption keys stay fresh. Keep `signKey` secret. When omitted, each KeyPackage gets a fresh signature key.
 - **`clientId`** - Default `d`-tag slot for published kind 30443 key packages. `create()` throws `MissingSlotIdentifierError` if neither `clientId` nor an explicit `identifier` is set.
 
 ::: warning Publication slot

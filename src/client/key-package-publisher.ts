@@ -3,6 +3,7 @@ import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 import { EventSigner } from "applesauce-core";
 import { NostrEvent } from "applesauce-core/helpers/event";
 import {
+  CiphersuiteImpl,
   CiphersuiteName,
   ciphersuites,
   CryptoProvider,
@@ -16,7 +17,10 @@ import {
   createDeleteKeyPackageEvent,
   createKeyPackageEvent,
 } from "../core/key-package-event.js";
-import { generateKeyPackage } from "../core/key-package.js";
+import {
+  generateKeyPackage,
+  type SignatureKeyPair,
+} from "../core/key-package.js";
 import { logger } from "../utils/debug.js";
 import { NostrNetworkInterface } from "./nostr-interface.js";
 
@@ -28,6 +32,10 @@ export type KeyPackagePublisherOptions = {
   network: NostrNetworkInterface;
   /** The crypto provider to use for cryptographic operations */
   cryptoProvider?: CryptoProvider;
+  /** Load a persisted signing identity for the selected ciphersuite. */
+  getSignatureKeyPair?: (
+    ciphersuite: CiphersuiteImpl,
+  ) => Promise<SignatureKeyPair>;
 };
 
 /** A freshly generated key package and its private material. */
@@ -69,9 +77,11 @@ export class KeyPackagePublisher {
   readonly #signer: EventSigner;
   readonly #network: NostrNetworkInterface;
   readonly #cryptoProvider: CryptoProvider;
+  readonly #getSignatureKeyPair: KeyPackagePublisherOptions["getSignatureKeyPair"];
   #log = logger.extend("KeyPackagePublisher");
 
   constructor(options: KeyPackagePublisherOptions) {
+    this.#getSignatureKeyPair = options.getSignatureKeyPair;
     this.#signer = options.signer;
     this.#network = options.network;
     this.#cryptoProvider = options.cryptoProvider ?? defaultCryptoProvider;
@@ -98,6 +108,7 @@ export class KeyPackagePublisher {
     return generateKeyPackage({
       credential,
       ciphersuiteImpl,
+      signatureKeyPair: await this.#getSignatureKeyPair?.(ciphersuiteImpl),
       isLastResort: options?.isLastResort,
       signer: this.#signer,
     });

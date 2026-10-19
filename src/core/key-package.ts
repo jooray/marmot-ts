@@ -71,8 +71,15 @@ export async function calculateKeyPackageRef(
   return await makeKeyPackageRef(keyPackage, ciphersuiteImpl.hash);
 }
 
+/** Signature key material returned by the selected ciphersuite. Keep signKey secret. */
+export type SignatureKeyPair = Awaited<
+  ReturnType<CiphersuiteImpl["signature"]["keygen"]>
+>;
+
 /** Options for generating a marmot key package */
 export type GenerateKeyPackageOptions = {
+  /** Reuse an installation signing identity; init and encryption keys remain fresh. */
+  signatureKeyPair?: SignatureKeyPair;
   credential: Credential;
   capabilities?: Capabilities;
   lifetime?: Lifetime;
@@ -118,6 +125,7 @@ export async function generateKeyPackage({
   isLastResort = true,
   signer,
   createdAt,
+  signatureKeyPair: suppliedSignatureKeyPair,
   ciphersuiteImpl,
 }: GenerateKeyPackageOptions): Promise<CompleteKeyPackage> {
   if (credential.credentialType !== defaultCredentialTypes.basic)
@@ -164,8 +172,32 @@ export async function generateKeyPackage({
   // Every leaf carries exactly one 0x8009 account identity proof binding the
   // leaf signature key to the Nostr account (refs/marmot/app-components/
   // account-identity-proof-v2.md; refs/marmot/foundation/key-packages.md).
-  // The leaf signature keypair is generated first so the proof can bind it.
-  const signatureKeyPair = await ciphersuiteImpl.signature.keygen();
+  // The leaf signature keypair is selected first so the proof can bind it.
+  const signatureKeyPair =
+    suppliedSignatureKeyPair ?? (await ciphersuiteImpl.signature.keygen());
+  if (suppliedSignatureKeyPair) {
+    // A sign/verify round trip validates both the algorithm and matching halves.
+    // Do not expose key material or provider errors in the failure message.
+    const challenge = new TextEncoder().encode(
+      "marmot-ts signature key validation",
+    );
+    let valid = false;
+    try {
+      const signature = await ciphersuiteImpl.signature.sign(
+        signatureKeyPair.signKey,
+        challenge,
+      );
+      valid = await ciphersuiteImpl.signature.verify(
+        signatureKeyPair.publicKey,
+        challenge,
+        signature,
+      );
+    } catch {
+      /* Reject malformed or incompatible key material below. */
+    }
+    if (!valid)
+      throw new Error("signatureKeyPair is incompatible with the ciphersuite");
+  }
   const proof = await produceAccountIdentityProof({
     signer,
     accountIdentity: hexToBytes(accountPubkey),

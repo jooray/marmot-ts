@@ -30,7 +30,10 @@ import {
   MissingRelayError,
   MissingSlotIdentifierError,
 } from "./key-package-errors.js";
-import { KeyPackagePublisher } from "./key-package-publisher.js";
+import {
+  KeyPackagePublisher,
+  type KeyPackagePublisherOptions,
+} from "./key-package-publisher.js";
 import {
   KeyPackageStore,
   normalizeKeyPackageRelays,
@@ -148,6 +151,8 @@ export type KeyPackageManagerOptions = {
   network: NostrNetworkInterface;
   /** The crypto provider to use for cryptographic operations */
   cryptoProvider?: CryptoProvider;
+  /** Load a persisted installation signing identity. */
+  getSignatureKeyPair?: KeyPackagePublisherOptions["getSignatureKeyPair"];
   /**
    * Injectable Nostr event verifier for the 30443 KeyPackage trust boundary
    * (SEC-01). Defaults to applesauce's `verifyEvent`. Stored for the
@@ -195,6 +200,7 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
       signer: options.signer,
       network: options.network,
       cryptoProvider: options.cryptoProvider,
+      getSignatureKeyPair: options.getSignatureKeyPair,
     });
     this.#verifyEvent = options.verifyEvent ?? defaultVerifyEvent;
     this.#log(
