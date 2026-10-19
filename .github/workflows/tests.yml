@@ -58,8 +58,9 @@ jobs:
       - name: Typecheck test sources
         run: pnpm typecheck:tests
 
-      - name: Run portable package and finding invariants
-        run: pnpm test:phase18-invariants
+      - name: Test packaging and release scripts
+        if: matrix.node-version == '24.x'
+        run: node --test scripts/__tests__/*.test.mjs
 
       - name: Run tests
         run: pnpm vitest run

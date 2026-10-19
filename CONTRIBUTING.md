@@ -32,6 +32,7 @@ Thank you for your interest in contributing to marmot-ts! This document provides
 
 ### Available Scripts
 
+- `pnpm check` - Check formatting, types, tests, and build before a PR
 - `pnpm build` - Clean, build the MLS fork, compile the library, and vendor the fork
 - `pnpm clean` - Remove the dist directory
 - `pnpm compile` - Compile production TypeScript files
@@ -42,37 +43,29 @@ Thank you for your interest in contributing to marmot-ts! This document provides
 - `pnpm format` / `pnpm lint` - Format code / check formatting with Prettier
 - `pnpm prepare` - Build the workspace MLS fork (also runs during installation)
 
-`pnpm typecheck:tests` uses `tsconfig.tests.json` to include every `src/**/*.ts`
-file, including runtime tests, the extended conformance spec, and shared helpers.
-It inherits the production compiler's strict, unused-variable, and return checks,
-and resets the production project's test exclusions. Run it explicitly alongside
-runtime tests: `pnpm test` and other test/watch commands do not invoke it.
-CI runs this exact command after frozen dependency installation in the existing
-Node.js 20/22/24 matrix; Bun and Deno continue to run their runtime suites.
-
 ### Making Changes
 
-1. Make your changes in the appropriate files
-2. Add or update tests for your changes
-3. Run linting and formatting:
-   ```bash
-   pnpm format
-   pnpm lint
-   ```
-4. Run the strict source check and runtime test suite:
-   ```bash
-   pnpm typecheck:tests
-   pnpm vitest run
-   pnpm conformance:extended
-   ```
-5. Build the project to ensure it compiles:
-   ```bash
-   pnpm build
-   ```
-6. After building, check the packed package:
-   ```bash
-   bash scripts/package-smoke/run.sh
-   ```
+Use `pnpm test` while working, or run a focused test:
+
+```bash
+pnpm vitest run src/path/file.test.ts
+```
+
+Before opening a PR, run:
+
+```bash
+pnpm check
+```
+
+This checks formatting, TypeScript (including tests), the runtime tests, and the
+build. Use `pnpm format` to fix formatting. Add or update tests when they protect
+meaningful behavior; retire temporary migration checks when they stop being useful.
+
+CI also runs the runtime tests on supported Node, Bun, and Deno versions, extended
+conformance tests, and packaging/release script tests. Run `pnpm conformance:extended`
+locally when changing protocol behavior, and `pnpm docs:build` when changing docs.
+The release commands verify the packed tarball before publishing; there is no
+separate consumer smoke harness to run.
 
 ## Changelog
 
@@ -86,7 +79,7 @@ migration guidance for breaking changes. Internal-only maintenance does not need
 1. Move the Unreleased entries into a section named for the release version and leave
    an empty `## Unreleased` section for future changes.
 2. Update the root `package.json` version and run `pnpm install --lockfile-only`.
-3. Run `pnpm build`, `pnpm vitest run`, and `bash scripts/package-smoke/run.sh`.
+3. Run `pnpm check` and ensure CI passes.
 4. Commit the release metadata through a PR and merge it into `master`.
 5. Tag the merged commit as `v<version>` (for example, `v0.6.0`) and push the tag.
    The release workflow verifies the version and changelog, publishes the library to

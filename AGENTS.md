@@ -23,7 +23,7 @@ Use pnpm 10 and Node.js 20+.
 - `pnpm vitest run`: run tests once; `pnpm test` starts watch mode.
 - `pnpm format` / `pnpm lint`: Prettier formatting/checking.
 - `pnpm docs:dev` / `pnpm docs:build`: serve/build docs and API reference.
-- After building, `bash scripts/package-smoke/run.sh`: test the packed package.
+- `pnpm check`: formatting, types, runtime tests, and build before a PR.
 
 ## Coding and Testing
 
@@ -49,7 +49,7 @@ breaking changes with migration guidance.
 
 Add new docs pages to `.vitepress/config.ts`. Use `.agents/skills/applesauce/` for Nostr work and `.agents/skills/opentui/` for terminal UIs.
 
-Before edits, start `/gsd-quick`, `/gsd-debug`, or `/gsd-execute-phase`, unless explicitly bypassed by the user.
+Use focused checks while developing and `pnpm check` before a PR. Add tests for meaningful behavior; retire temporary migration and planning checks when they no longer serve the library. Use GSD workflows when requested or when the task benefits from planning; routine changes do not require planning artifacts.
 
 <!-- GSD:profile-start -->
 

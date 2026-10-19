@@ -17,10 +17,6 @@
     "lint": "prettier --check .",
     "format": "prettier --write .",
     "test": "vitest",
-    "test:package-invariants": "node --test scripts/__tests__/package-checks.test.mjs scripts/__tests__/finding-dispositions.test.mjs",
-    "test:windows-ledger:portable": "node --test --test-name-pattern='portable ledger invariants' scripts/__tests__/windows-ledger.test.mjs",
-    "test:windows-ledger:owner": "node --test --test-name-pattern='owner status-append-status roundtrip' scripts/__tests__/windows-ledger.test.mjs",
-    "test:phase18-invariants": "pnpm test:package-invariants && pnpm test:windows-ledger:portable",
     "typecheck:tests": "tsc -p tsconfig.tests.json",
     "conformance:extended": "vitest run --config vitest.extended.config.ts",
     "docs": "vitepress dev",
@@ -29,7 +25,8 @@
     "postdocs:build": "pnpm run typedoc:build",
     "docs:preview": "vitepress preview",
     "typedoc:build": "typedoc",
-    "typedoc:serve": "pnpx serve .vitepress/dist/reference"
+    "typedoc:serve": "pnpx serve .vitepress/dist/reference",
+    "check": "pnpm lint && pnpm typecheck:tests && pnpm vitest run && pnpm build"
   },
   "repository": {
     "type": "git",

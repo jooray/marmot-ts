@@ -9,7 +9,7 @@
 // (either it is marked private, or its exact version is already published upstream, which
 // cannot be republished under that version).
 //
-// Used by `pnpm release`, `scripts/release-next.sh`, and `scripts/package-smoke/run.sh`.
+// Used by `pnpm release` and `scripts/release-next.sh`.
 // Uses Node.js builtins and the shared TypeScript-backed package guard helper.
 
 import { execFileSync } from "node:child_process";
