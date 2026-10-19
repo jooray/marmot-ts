@@ -142,9 +142,11 @@ describe("source-epoch expiration (app-components/message-retention-v1.md)", () 
         content: "retained",
         created_at,
       });
+      // Encoded directly: serializeApplicationRumor refuses the invalid
+      // timestamps, but the engine must still omit the hint for raw payloads.
       const sent = await engine.send({
         kind: "applicationMessage",
-        payload: serializeApplicationRumor(rumor),
+        payload: new TextEncoder().encode(JSON.stringify(rumor)),
       });
       expect(sent.kind).toBe("applicationMessage");
       if (sent.kind !== "applicationMessage")
