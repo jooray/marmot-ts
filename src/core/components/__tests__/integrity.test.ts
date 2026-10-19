@@ -57,7 +57,10 @@ import {
   componentEntry,
   getComponentData,
   makeAppComponentsExtension,
+  makeLeafAppComponentsExtension,
 } from "../dictionary.js";
+import { marmotRequiredCapabilitiesExtension } from "../../capabilities.js";
+import { defaultCapabilities } from "../../default-capabilities.js";
 import {
   ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
   APP_COMPONENTS_COMPONENT_ID,
@@ -1261,6 +1264,21 @@ describe("validateCommitLegality", () => {
     } as unknown as ClientState;
   }
 
+  /** A fake state whose leaves advertise the Marmot capabilities and components. */
+  function fakeCurrentProfileState(
+    extensions: GroupContextExtension[],
+    memberPubkeys: string[],
+  ): ClientState {
+    const state = fakeClientState(extensions, memberPubkeys);
+    for (const node of state.ratchetTree)
+      if (node?.nodeType === nodeTypes.leaf)
+        Object.assign(node.leaf, {
+          capabilities: defaultCapabilities(),
+          extensions: [makeLeafAppComponentsExtension(new Uint8Array(104))],
+        });
+    return state;
+  }
+
   it("rejects requiring and removing a component in the same resulting epoch", () => {
     // Parent: app_components only requires GROUP_PROFILE_COMPONENT_ID (plus
     // the current-profile 0x8009 requirement, so this fixture stays inside
@@ -1350,16 +1368,22 @@ describe("validateCommitLegality", () => {
   });
 
   it("returns undefined for a benign commit that changes nothing in the dictionary and removes no member", () => {
-    const extensions = dict(
-      appComponentsEntry([ACCOUNT_IDENTITY_PROOF_COMPONENT_ID]),
-      adminPolicyEntry([ADMIN_PUBKEY]),
-      componentEntry(GROUP_PROFILE_COMPONENT_ID, new Uint8Array([1])),
-    );
-    const parentState = fakeClientState(extensions, [
+    const extensions = [
+      marmotRequiredCapabilitiesExtension(),
+      ...dict(
+        appComponentsEntry([
+          GROUP_ADMIN_POLICY_COMPONENT_ID,
+          ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
+        ]),
+        adminPolicyEntry([ADMIN_PUBKEY]),
+        componentEntry(GROUP_PROFILE_COMPONENT_ID, new Uint8Array([1])),
+      ),
+    ];
+    const parentState = fakeCurrentProfileState(extensions, [
       ADMIN_PUBKEY,
       MEMBER_PUBKEY,
     ]);
-    const resultingState = fakeClientState(extensions, [
+    const resultingState = fakeCurrentProfileState(extensions, [
       ADMIN_PUBKEY,
       MEMBER_PUBKEY,
     ]);
