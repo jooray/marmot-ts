@@ -95,15 +95,3 @@ jobs:
           else
             gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --latest --notes-file release-notes.md
           fi
-
-      - name: Publish Nostr notification
-        continue-on-error: true
-        env:
-          NOSTR_KEY: ${{ secrets.NOSTR_KEY }}
-        run: |
-          # Install nak CLI
-          sudo curl -L https://github.com/fiatjaf/nak/releases/latest/download/nak-linux-amd64 -o /usr/local/bin/nak
-          sudo chmod +x /usr/local/bin/nak
-          # Publish Nostr notification
-          chmod +x scripts/publish-nostr.sh
-          ./scripts/publish-nostr.sh
