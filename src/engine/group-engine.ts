@@ -3060,8 +3060,11 @@ export class MarmotGroupEngine<TEnvelope> {
    * since the last convergence-relevant input elapses (B5). Cancels any pending
    * check first, so a fresh input always restarts the window. A no-op when no
    * settle callback is wired (the engine has nothing to notify).
+   *
+   * `minDelayMs` floors the delay of a re-arm after an early wake, so a timer
+   * that keeps firing before {@link #now} reaches the cutoff cannot spin.
    */
-  #scheduleSettleCheck(): void {
+  #scheduleSettleCheck(minDelayMs = 0): void {
     if (!this.#onSettleCheck) return;
     if (this.#settleTimer !== undefined) {
       this.#scheduler.clearTimer(this.#settleTimer);
@@ -3074,15 +3077,22 @@ export class MarmotGroupEngine<TEnvelope> {
     const cutoffAt = this.#convergencePass
       ? Math.min(quiescenceAt, this.#convergencePass.deadlineMs)
       : quiescenceAt;
-    const delay = Math.max(0, cutoffAt - nowMs);
+    const delay = Math.max(minDelayMs, cutoffAt - nowMs);
     this.#settleTimer = this.#scheduler.setTimer(delay, () => {
       if (this.#retentionLease) {
         void this.#retentionLease.done.then(() => this.#runSettleCheck());
         return;
       }
       this.#settleTimer = undefined;
-      if (this.#convergencePass && this.#now() >= cutoffAt)
-        this.#closeConvergencePass();
+      // The timer may fire before the injected clock reaches the cutoff (a
+      // different clock source, or timer coarsening). Waking the owner now
+      // would see Syncing and arm nothing, stranding queued outbound (#109);
+      // re-arm for the remainder of the window instead.
+      if (this.#now() < cutoffAt) {
+        this.#scheduleSettleCheck(1);
+        return;
+      }
+      if (this.#convergencePass) this.#closeConvergencePass();
       // Fire-and-forget; the owner's drain handles and logs its own errors.
       void this.#runSettleCheck();
     });

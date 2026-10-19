@@ -1378,7 +1378,11 @@ export class MarmotGroup<
     // predicate, so the profile gate (D-12) and the already-disbanded check
     // cannot be present on one resume path and missing on the other.
     await this.resumePendingDisband();
-    if (resumed.length === 0) await this.#drainOutbound();
+    // Drain even when retained input was resumed (#109): `#drainOutbound`
+    // re-checks the release gate, so it is a no-op if that input reopened the
+    // window (which arms a fresh settle check). Resumed input that is not
+    // convergence-relevant arms nothing, so this wake is the last chance.
+    await this.#drainOutbound();
   }
 
   /**

@@ -8,6 +8,7 @@
 - Enforce the spec's 16-relay limit on Nostr routing state when encoding and decoding. Larger relay lists made Welcomes unjoinable and routing updates fail for White Noise members. The limit is exported as `NOSTR_ROUTING_MAX_RELAYS`.
 - Group avatar URLs on localhost or private-network hosts are now valid group state, as the spec requires and MDK accepts. Previously marmot-ts members rejected a White Noise commit setting such an avatar and fell an epoch behind. Call the new `rejectUnsafeGroupAvatarContactUrl()` before fetching or rendering an avatar.
 - Reject URLs ending in an empty fragment (a trailing `#`) in avatar URLs, encrypted-media endpoints and Nostr routing relays, as MDK does. A group created with such an avatar could not be joined by White Noise users.
+- Messages and commits sent while a group is settling after a commit are now always published once the group settles, even when the settle timer fires slightly early or retained messages are processed at the same time. Previously such sends could stay pending indefinitely.
 
 ## 0.6.0
 
