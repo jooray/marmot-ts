@@ -21,6 +21,7 @@ import type { MarmotGroupInfo } from "../core/client-state.js";
 import { GROUP_EVENT_KIND } from "../core/protocol.js";
 import { marmotAuthService } from "../core/auth-service.js";
 import { validateWelcomeGroup } from "../core/welcome-join.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
 import type { ConvergencePolicy } from "../core/convergence.js";
 import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
 import type { AuditContextOptions, AuditSink } from "../audit/index.js";
@@ -1138,6 +1139,7 @@ export class GroupsManager<
           context: {
             cipherSuite: ciphersuiteImpl,
             authService: marmotAuthService,
+            clientConfig: defaultMarmotClientConfig,
             externalPsks: {},
           },
           welcome,

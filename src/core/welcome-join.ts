@@ -18,6 +18,7 @@ import {
 } from "ts-mls";
 import { marmotAuthService } from "./auth-service.js";
 import { isReusableKeyPackage } from "./key-package-dictionary.js";
+import { defaultMarmotClientConfig } from "./client-config.js";
 import { type MarmotGroupView, getMarmotGroupView } from "./client-state.js";
 import { getWelcome } from "./welcome-event.js";
 import { marmotRequiredCapabilitiesExtension } from "./capabilities.js";
@@ -198,6 +199,7 @@ export async function readWelcomeGroupInfo({
       context: {
         cipherSuite: ciphersuiteImpl,
         authService: marmotAuthService,
+        clientConfig: defaultMarmotClientConfig,
         externalPsks: {},
       },
       welcome,

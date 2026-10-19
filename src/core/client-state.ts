@@ -1,17 +1,11 @@
 /** @module @category Core - Client State */
 import { bytesToHex } from "@noble/hashes/utils.js";
 import {
-  ClientConfig,
   ClientState,
   clientStateDecoder,
   clientStateEncoder,
   ciphersuites,
   decode,
-  defaultAppDataUpdateCallback,
-  defaultKeyPackageEqualityConfig,
-  defaultKeyRetentionConfig,
-  defaultLifetimeConfig,
-  defaultPaddingConfig,
   getAppDataDictionary,
   GroupInfo,
   nodeTypes,
@@ -64,16 +58,7 @@ import type {
 import { getGroupImageSource, type GroupImageSource } from "./group-image.js";
 import { getGroupMemberPubkeys } from "./group-members.js";
 
-/** Default ClientConfig for Marmot. */
-export const defaultMarmotClientConfig: ClientConfig = {
-  keyRetentionConfig: defaultKeyRetentionConfig,
-  lifetimeConfig: defaultLifetimeConfig,
-  keyPackageEqualityConfig: defaultKeyPackageEqualityConfig,
-  paddingConfig: defaultPaddingConfig,
-  // Marmot v2 app components use full-replacement update payloads, so the
-  // default last-update-wins callback is the correct merge policy.
-  appDataUpdateCallback: defaultAppDataUpdateCallback,
-};
+export { defaultMarmotClientConfig } from "./client-config.js";
 
 /**
  * A read projection of a Marmot group's app-component state, assembled from the

@@ -20,6 +20,7 @@ import {
 import { verifyApplicationRumorAuthorship } from "../core/application-rumor.js";
 import { getGroupProfileSupport } from "../core/components/account-identity-proof.js";
 import { marmotAuthService } from "../core/auth-service.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
 import {
   deserializeClientState,
   serializeClientState,
@@ -653,6 +654,7 @@ export async function* ingestEnvelopes<TEnvelope>(
         context: {
           cipherSuite: ctx.ciphersuite,
           authService: marmotAuthService,
+          clientConfig: defaultMarmotClientConfig,
           externalPsks: {},
         },
         state: parentForAuth,
@@ -865,6 +867,7 @@ export async function* ingestEnvelopes<TEnvelope>(
         context: {
           cipherSuite: ctx.ciphersuite,
           authService: marmotAuthService,
+          clientConfig: defaultMarmotClientConfig,
           externalPsks: {},
         },
         state: parentForAuth,

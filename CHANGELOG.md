@@ -10,6 +10,7 @@
 - Reject URLs ending in an empty fragment (a trailing `#`) in avatar URLs, encrypted-media endpoints and Nostr routing relays, as MDK does. A group created with such an avatar could not be joined by White Noise users.
 - Messages and commits sent while a group is settling after a commit are now always published once the group settles, even when the settle timer fires slightly early or retained messages are processed at the same time. Previously such sends could stay pending indefinitely.
 - New groups keep the app-data dictionary last in their GroupContext extensions, matching MDK, so renames, admin changes and relay updates no longer split White Noise members off the group. Existing dictionary-first groups are not migrated yet.
+- Application messages are no longer lost when they are read up to five commits after being sent, or while catching up on a burst of more than ten messages. MLS key retention now matches the spec and MDK: 5 past epochs, 100 skipped generations and a 1000-step forward limit.
 
 ### Breaking
 
