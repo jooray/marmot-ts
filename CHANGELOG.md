@@ -5,6 +5,7 @@
 ### Fixed
 
 - Reject `app_components` lists whose ids are not in ascending order, matching MDK, so marmot-ts and White Noise members agree on which GroupContexts, LeafNodes and KeyPackages are valid.
+- Enforce the spec's 16-relay limit on Nostr routing state when encoding and decoding. Larger relay lists made Welcomes unjoinable and routing updates fail for White Noise members. The limit is exported as `NOSTR_ROUTING_MAX_RELAYS`.
 
 ## 0.6.0
 
