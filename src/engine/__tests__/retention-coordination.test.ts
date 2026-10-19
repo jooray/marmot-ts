@@ -1,6 +1,7 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { getEventHash } from "applesauce-core/helpers/event";
 import {
+  appDataDictionaryExtensionType,
   defaultCryptoProvider,
   createApplicationMessage,
   createCommit,
@@ -116,6 +117,10 @@ async function fixture(
         keyPackage: kp.publicPackage,
         privateKeyPackage: kp.privatePackage,
         extensions: [
+          ...clientState.groupContext.extensions.filter(
+            (extension) =>
+              extension.extensionType !== appDataDictionaryExtensionType,
+          ),
           makeAppComponentsExtension([
             appComponentsEntry(
               getAppComponents(clientState.groupContext.extensions)!.filter(
@@ -130,7 +135,6 @@ async function fixture(
                 entry.componentId !== APP_COMPONENTS_COMPONENT_ID,
             ),
           ]),
-          ...clientState.groupContext.extensions.slice(1),
         ],
       })
     : clientState;
