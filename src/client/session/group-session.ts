@@ -508,6 +508,9 @@ export class GroupSession<
         (record.version === 2 &&
           (typeof record.removingCommitter !== "string" ||
             !/^([0-9a-f]{64})?$/.test(record.removingCommitter))) ||
+        (record.removingPriority !== undefined &&
+          record.removingPriority !== "privileged" &&
+          record.removingPriority !== "ordinary") ||
         record.groupId !== bytesToHex(this.id) ||
         !/^[0-9a-f]{64}$/.test(record.removalDigest) ||
         !/^[0-9a-f]+$/.test(record.parentTag) ||

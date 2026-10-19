@@ -4164,6 +4164,9 @@ export class MarmotGroupEngine<TEnvelope> {
       (attribution.version === 2 &&
         (typeof attribution.removingCommitter !== "string" ||
           !/^([0-9a-f]{64})?$/.test(attribution.removingCommitter))) ||
+      (attribution.removingPriority !== undefined &&
+        attribution.removingPriority !== "privileged" &&
+        attribution.removingPriority !== "ordinary") ||
       !/^[0-9a-f]{64}$/.test(attribution.removalDigest) ||
       !Number.isSafeInteger(attribution.parentEpoch) ||
       attribution.parentEpoch < 0 ||
@@ -4204,6 +4207,9 @@ export class MarmotGroupEngine<TEnvelope> {
       tipCommitter: hexToBytes(
         attribution.version === 2 ? attribution.removingCommitter! : "",
       ),
+      // Records written before the priority was kept rank the removal as
+      // privileged, which likewise keeps it in place on a tie.
+      tipPriority: attribution.removingPriority ?? "privileged",
       appWitnesses: [],
     };
     let candidates = await buildRemovalBranchSet(this.#tree, attribution);

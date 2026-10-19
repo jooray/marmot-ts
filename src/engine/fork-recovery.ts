@@ -68,7 +68,7 @@ import type { EdgeSnapshot } from "./history-tree.js";
 import type { RetainedAppliedLink } from "./retained-store.js";
 import type { GroupHistoryTree } from "./history-tree.js";
 import type { DisbandCandidateEvidence, GroupPeeler } from "./types.js";
-import { framedEpoch } from "./wire-format.js";
+import { framedCommitProposalsWithSender, framedEpoch } from "./wire-format.js";
 
 /** One applied step on a candidate branch: parent → message → child. */
 export interface ChainLink {
@@ -82,6 +82,8 @@ export interface RemovalAttribution {
   version: 1 | 2;
   /** Version 2 preserves the normal resolver's authenticated sender input. */
   removingCommitter?: string;
+  /** The removal commit's `tip_priority`; absent in records written before it was kept. */
+  removingPriority?: CommitOrderingPriority;
   removalDigest: string;
   parentTag: string;
   parentEpoch: number;
@@ -116,12 +118,14 @@ export async function buildRemovalBranchSet(
       continue;
     const tipCommitter = await treeTipCommitter(tree, tip);
     if (!tipCommitter) return undefined;
+    const tipPriority = await treeTipPriority(tree, tip);
     candidates.push({
       id: tip,
       forkEpoch: attribution.parentEpoch,
       tipEpoch: epoch,
       tipDigest: digest,
       tipCommitter,
+      ...(tipPriority ? { tipPriority } : {}),
       appWitnesses: [],
     });
   }
@@ -161,6 +165,28 @@ export async function treeTipCommitter(
   const parent = await tree.stateAt(parentTag);
   const message = await tree.commitMessageOf(tag);
   return parent && message ? tipCommitterOf(parent, message) : undefined;
+}
+
+/**
+ * The `tip_priority` of the commit that produced tree node `tag`, classified
+ * from its proposals against the stored parent, or from the own-commit stamp
+ * when they cannot be rebuilt. `undefined` when neither is available.
+ */
+export async function treeTipPriority(
+  tree: GroupHistoryTree,
+  tag: string,
+): Promise<CommitOrderingPriority | undefined> {
+  const parentTag = tree.node(tag)?.parentTag;
+  if (!parentTag) return undefined;
+  const parent = await tree.stateAt(parentTag);
+  const message = await tree.commitMessageOf(tag);
+  const framed =
+    parent && message
+      ? framedCommitProposalsWithSender(message, parent)
+      : undefined;
+  return framed
+    ? commitOrderingPriority(framed.proposals)
+    : (await tree.ownCommitStampOf(tag))?.priority;
 }
 
 /**
