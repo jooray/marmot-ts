@@ -4751,35 +4751,6 @@ export class MarmotGroupEngine<TEnvelope> {
 }
 
 /**
- * WR-05/CR-02: `state` with every staged proposal that would not pass
- * pre-apply admission removed from `unappliedProposals`, so `createCommit`
- * never bundles it by reference. Returns `state` itself when nothing is pruned.
- *
- * Covers an Add whose KeyPackage lacks a valid `0x8009` proof, an
- * `AppDataUpdate` whose payload does not decode (or that targets an id no
- * commit may write), and — WR-01 — an Update whose replacement leaf fails the
- * same account-identity gate the standalone Update-admission seam applies.
- * Such a proposal can only be staged by an older build or a rewind onto a
- * pre-upgrade snapshot; refusing the commit over it would block every local
- * commit — including `selfUpdate` and the `self_remove` auto-commit — for the
- * rest of the epoch, so it is dropped instead, mirroring MDK's discard of
- * invalid standalone proposals.
- *
- * Omitting Updates here was a live deadlock, not a cosmetic gap: Phase 9 made
- * a proof-invalid staged Update commit-blocking POST-apply in
- * {@link MarmotGroupEngine.#assertStagedCommitLegal}, while `createCommit`
- * went on bundling it by reference — so every `send({kind:"commit"})` and
- * `send({kind:"selfUpdate"})` threw `CommitLegalityError` for the rest of an
- * epoch that only a commit could end.
- *
- * Each staged proposal is validated ALONE and with no `requiredIds`, which is
- * exactly MDK's standalone-admission semantics. Batch-level verdicts (a
- * duplicate component id spanning two staged proposals, or a Remove of a
- * still-required component) are deliberately NOT evaluated here — pruning on
- * one would silently delete a proposal that is individually valid. Those are
- * caught by the batch check in {@link MarmotGroupEngine.#prepareOutboundCommitProposals}.
- */
-/**
  * A `GroupContextExtensions` proposal that moves `app_data_dictionary` to the
  * end of the GroupContext extension list, for a commit that carries an
  * AppDataUpdate in a group whose dictionary is not already last. `undefined`
@@ -4848,6 +4819,35 @@ function dictionaryLastRepairFor(
   };
 }
 
+/**
+ * WR-05/CR-02: `state` with every staged proposal that would not pass
+ * pre-apply admission removed from `unappliedProposals`, so `createCommit`
+ * never bundles it by reference. Returns `state` itself when nothing is pruned.
+ *
+ * Covers an Add whose KeyPackage lacks a valid `0x8009` proof, an
+ * `AppDataUpdate` whose payload does not decode (or that targets an id no
+ * commit may write), and — WR-01 — an Update whose replacement leaf fails the
+ * same account-identity gate the standalone Update-admission seam applies.
+ * Such a proposal can only be staged by an older build or a rewind onto a
+ * pre-upgrade snapshot; refusing the commit over it would block every local
+ * commit — including `selfUpdate` and the `self_remove` auto-commit — for the
+ * rest of the epoch, so it is dropped instead, mirroring MDK's discard of
+ * invalid standalone proposals.
+ *
+ * Omitting Updates here was a live deadlock, not a cosmetic gap: Phase 9 made
+ * a proof-invalid staged Update commit-blocking POST-apply in
+ * {@link MarmotGroupEngine.#assertStagedCommitLegal}, while `createCommit`
+ * went on bundling it by reference — so every `send({kind:"commit"})` and
+ * `send({kind:"selfUpdate"})` threw `CommitLegalityError` for the rest of an
+ * epoch that only a commit could end.
+ *
+ * Each staged proposal is validated ALONE and with no `requiredIds`, which is
+ * exactly MDK's standalone-admission semantics. Batch-level verdicts (a
+ * duplicate component id spanning two staged proposals, or a Remove of a
+ * still-required component) are deliberately NOT evaluated here — pruning on
+ * one would silently delete a proposal that is individually valid. Those are
+ * caught by the batch check in {@link MarmotGroupEngine.#prepareOutboundCommitProposals}.
+ */
 function withoutInadmissibleStagedProposals(
   state: ClientState,
   ciphersuiteId: number,

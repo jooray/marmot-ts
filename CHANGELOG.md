@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Groups created before 0.7.0, with the app-data dictionary first in their GroupContext extensions, can now be renamed and have their admins, relays or other components changed without splitting off White Noise members. The first such commit by a marmot-ts admin also moves the dictionary last, so later updates need no repair. Groups that already split on an earlier update are not recovered.
+
 ## 0.7.0
 
 ### Added
