@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-Future changes will be recorded here.
+### Fixed
+
+- Reject `app_components` lists whose ids are not in ascending order, matching MDK, so marmot-ts and White Noise members agree on which GroupContexts, LeafNodes and KeyPackages are valid.
 
 ## 0.6.0
 
