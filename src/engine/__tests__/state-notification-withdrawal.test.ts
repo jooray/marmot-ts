@@ -20,7 +20,6 @@ import { describe, expect, it } from "vitest";
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
 import {
   commitDigest,
-  compareCommitOrderingKeys,
   DEFAULT_CONVERGENCE_POLICY,
 } from "../../core/convergence.js";
 import { createCredential } from "../../core/credential.js";
@@ -719,36 +718,24 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
       encode(mlsMessageEncoder, sent.pending.commitMessage!),
     );
 
-    const peerCommit = (_attempt: number) =>
-      createCommit({
-        context: ctx,
-        state: memberEpoch1,
-        wireAsPublicMessage: true,
-        ratchetTreeExtension: true,
-        extraProposals: [],
-      });
-    let winner = await peerCommit(0);
-    for (
-      let attempt = 1;
-      attempt < 256 &&
-      compareCommitOrderingKeys(
-        { sourceEpoch: 1, commitDigest: localDigest },
-        {
-          sourceEpoch: 1,
-          commitDigest: commitDigest(encode(mlsMessageEncoder, winner.commit)),
-        },
-      ) <= 0;
-      attempt++
-    ) {
-      winner = await peerCommit(attempt);
-    }
-    const winnerDigest = commitDigest(encode(mlsMessageEncoder, winner.commit));
-    expect(
-      compareCommitOrderingKeys(
-        { sourceEpoch: 1, commitDigest: localDigest },
-        { sourceEpoch: 1, commitDigest: winnerDigest },
-      ),
-    ).toBeGreaterThan(0);
+    // The local commit carries an AppDataUpdate, so it is a privileged tip and
+    // beats a lone peer self-update at the same depth (`convergence.md`
+    // "Branch selection", step 4). The peer branch therefore wins on depth:
+    // two self-updates on top of the shared parent.
+    const peerFirst = await createCommit({
+      context: ctx,
+      state: memberEpoch1,
+      wireAsPublicMessage: true,
+      ratchetTreeExtension: true,
+      extraProposals: [],
+    });
+    const peerSecond = await createCommit({
+      context: ctx,
+      state: peerFirst.newState,
+      wireAsPublicMessage: true,
+      ratchetTreeExtension: true,
+      extraProposals: [],
+    });
 
     const confirmed = engine.confirmPublished(sent.pending);
     expect(confirmed.map((notification) => notification.kind)).toEqual(
@@ -758,8 +745,13 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
     const results: IngestResult<NostrEvent>[] = [];
     for await (const result of engine.ingest([
       await createGroupEvent({
-        message: winner.commit,
+        message: peerFirst.commit,
         state: memberEpoch1,
+        ciphersuite: impl,
+      }),
+      await createGroupEvent({
+        message: peerSecond.commit,
+        state: peerFirst.newState,
         ciphersuite: impl,
       }),
     ])) {
@@ -779,7 +771,10 @@ describe("state notification derivation + withdrawal (CONV-03, D-10/D-11)", () =
     ).toEqual(expect.arrayContaining(["epochAdvanced", "componentChanged"]));
     for (const notification of invalidated.withdrawn ?? []) {
       expect(notification.commitDigest).toEqual(localDigest);
-      expect(notification.commitDigest).not.toEqual(winnerDigest);
+      for (const peer of [peerFirst, peerSecond])
+        expect(notification.commitDigest).not.toEqual(
+          commitDigest(encode(mlsMessageEncoder, peer.commit)),
+        );
     }
     const payloadInvalidatedIndex = results.findIndex(
       (result) => result.kind === "invalidated",

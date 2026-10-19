@@ -42,6 +42,8 @@ import {
   type AppWitness,
   type BranchCandidate,
   commitDigest,
+  type CommitOrderingPriority,
+  commitOrderingPriority,
   compareBranchScores,
   type ConvergencePolicy,
   DEFAULT_CONVERGENCE_POLICY,
@@ -66,7 +68,7 @@ import type { EdgeSnapshot } from "./history-tree.js";
 import type { RetainedAppliedLink } from "./retained-store.js";
 import type { GroupHistoryTree } from "./history-tree.js";
 import type { DisbandCandidateEvidence, GroupPeeler } from "./types.js";
-import { framedEpoch } from "./wire-format.js";
+import { framedCommitProposalsWithSender, framedEpoch } from "./wire-format.js";
 
 /** One applied step on a candidate branch: parent → message → child. */
 export interface ChainLink {
@@ -80,6 +82,8 @@ export interface RemovalAttribution {
   version: 1 | 2;
   /** Version 2 preserves the normal resolver's authenticated sender input. */
   removingCommitter?: string;
+  /** The removal commit's `tip_priority`; absent in records written before it was kept. */
+  removingPriority?: CommitOrderingPriority;
   removalDigest: string;
   parentTag: string;
   parentEpoch: number;
@@ -114,12 +118,14 @@ export async function buildRemovalBranchSet(
       continue;
     const tipCommitter = await treeTipCommitter(tree, tip);
     if (!tipCommitter) return undefined;
+    const tipPriority = await treeTipPriority(tree, tip);
     candidates.push({
       id: tip,
       forkEpoch: attribution.parentEpoch,
       tipEpoch: epoch,
       tipDigest: digest,
       tipCommitter,
+      ...(tipPriority ? { tipPriority } : {}),
       appWitnesses: [],
     });
   }
@@ -162,6 +168,28 @@ export async function treeTipCommitter(
 }
 
 /**
+ * The `tip_priority` of the commit that produced tree node `tag`, classified
+ * from its proposals against the stored parent, or from the own-commit stamp
+ * when they cannot be rebuilt. `undefined` when neither is available.
+ */
+export async function treeTipPriority(
+  tree: GroupHistoryTree,
+  tag: string,
+): Promise<CommitOrderingPriority | undefined> {
+  const parentTag = tree.node(tag)?.parentTag;
+  if (!parentTag) return undefined;
+  const parent = await tree.stateAt(parentTag);
+  const message = await tree.commitMessageOf(tag);
+  const framed =
+    parent && message
+      ? framedCommitProposalsWithSender(message, parent)
+      : undefined;
+  return framed
+    ? commitOrderingPriority(framed.proposals)
+    : (await tree.ownCommitStampOf(tag))?.priority;
+}
+
+/**
  * A resulting state already known for one of our own applied commits, together
  * with the confirmation tag of the exact parent it was applied to (CONV-04).
  *
@@ -176,6 +204,11 @@ export async function treeTipCommitter(
 export interface KnownNextState {
   parentTag: string;
   state: ClientState;
+  /**
+   * The commit's ordering class recorded when it was authored, used only when
+   * its proposals cannot be rebuilt from the parent snapshot.
+   */
+  priority?: CommitOrderingPriority;
 }
 
 /** Shared parent-relative candidate resolution used by live and tree recovery. */
@@ -183,6 +216,8 @@ export type ParentResolution =
   | {
       kind: "resolved";
       result: ProcessMessageResult & { kind: "newState" };
+      /** Ordering class of the resolved commit (`convergence.md` `tip_priority`). */
+      priority: CommitOrderingPriority;
     }
   | { kind: "authentication_mismatch" }
   | {
@@ -453,6 +488,9 @@ export async function resolveCandidateParent(params: {
       aad: new Uint8Array(),
     };
     const rebuilt = proposalsFromPublicCommit(parent, message);
+    const priority: CommitOrderingPriority = rebuilt
+      ? commitOrderingPriority(rebuilt.proposals)
+      : (known.priority ?? "ordinary");
     let outcome: CommitLegalityOutcome;
     try {
       outcome = rebuilt
@@ -472,7 +510,7 @@ export async function resolveCandidateParent(params: {
     }
     switch (outcome.kind) {
       case "legal":
-        return { kind: "resolved", result };
+        return { kind: "resolved", result, priority };
       case "violation":
         return {
           kind: "rejected",
@@ -527,7 +565,11 @@ export async function resolveCandidateParent(params: {
     );
     switch (outcome.kind) {
       case "legal":
-        return { kind: "resolved", result };
+        return {
+          kind: "resolved",
+          result,
+          priority: commitOrderingPriority(capturedCommit.proposals),
+        };
       case "violation":
         return {
           kind: "rejected",
@@ -727,6 +769,7 @@ export class ForkRecovery<TEnvelope> {
       seen: ReadonlySet<string>,
       chain: ChainLink[],
       witnesses: AppWitness[],
+      tipPriority?: CommitOrderingPriority,
     ): Promise<void> => {
       const accumulated = [...witnesses, ...(await witnessesAt(state))];
       let extended = false;
@@ -802,6 +845,7 @@ export class ForkRecovery<TEnvelope> {
               tipEpoch: forkEpoch + chain.length + 1,
               tipDigest: digest,
               tipCommitter: hexToBytes(terminal.actorPubkey),
+              tipPriority: resolution.priority,
               appWitnesses: accumulated,
             };
             tips.set(branch, next.newState);
@@ -832,6 +876,7 @@ export class ForkRecovery<TEnvelope> {
           new Set([...seen, tag]),
           [...chain, { parent: state, message, child: next.newState }],
           accumulated,
+          resolution.priority,
         );
       }
       if (!extended && !branchDeferred && tipMessage !== undefined) {
@@ -846,6 +891,7 @@ export class ForkRecovery<TEnvelope> {
           forkEpoch,
           tipEpoch,
           tipDigest: this.#commitDigestOf(tipMessage),
+          tipPriority,
           tipCommitter: tipCommitterOf(chain.at(-1)!.parent, tipMessage),
           // Drop witnesses at/before the fork epoch or outside the retained
           // app-payload window for this candidate's tip, so stale or pre-fork
@@ -953,6 +999,7 @@ export class ForkRecovery<TEnvelope> {
       knownNextStates.set(bytesToHex(this.#commitDigestOf(msg)), {
         parentTag: bytesToHex(parent.confirmationTag),
         state: deserializeClientState(serializeClientState(next)),
+        priority: structural.ownCommitStamp.priority,
       });
     }
 
@@ -989,10 +1036,12 @@ export class ForkRecovery<TEnvelope> {
           ? "witness_quorum_met"
           : winnerScore.appWitnessScore !== runner.appWitnessScore
             ? "app_witness_score"
-            : bytesToHex(winnerScore.tipCommitter) !==
-                bytesToHex(runner.tipCommitter)
-              ? "tip_committer"
-              : "tip_digest"
+            : winnerScore.tipPriority !== runner.tipPriority
+              ? "tip_priority"
+              : bytesToHex(winnerScore.tipCommitter) !==
+                  bytesToHex(runner.tipCommitter)
+                ? "tip_committer"
+                : "tip_digest"
       : "only_candidate";
     const decision = {
       selectedBranchId: bytesToHex(winnerTip.confirmationTag),

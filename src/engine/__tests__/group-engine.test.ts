@@ -16,6 +16,7 @@ import {
   type Proposal,
   joinGroup,
   makeCustomExtension,
+  nodeTypes,
   unsafeTestingAuthenticationService,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
@@ -142,9 +143,11 @@ describe("source-epoch expiration (app-components/message-retention-v1.md)", () 
         content: "retained",
         created_at,
       });
+      // Encoded directly: serializeApplicationRumor refuses the invalid
+      // timestamps, but the engine must still omit the hint for raw payloads.
       const sent = await engine.send({
         kind: "applicationMessage",
-        payload: serializeApplicationRumor(rumor),
+        payload: new TextEncoder().encode(JSON.stringify(rumor)),
       });
       expect(sent.kind).toBe("applicationMessage");
       if (sent.kind !== "applicationMessage")
@@ -541,8 +544,15 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
     function buildCallback(
       account: ReturnType<typeof PrivateKeyAccount.fromKey>,
     ) {
+      // Leaf 0 is the admin, so a standalone proposal it sends passes the
+      // proposal-sender gate and only the proof gate decides.
       return createAdminCommitPolicyCallback({
-        ratchetTree: [],
+        ratchetTree: [
+          {
+            nodeType: nodeTypes.leaf,
+            leaf: { credential: createCredential(account.pubkey) },
+          },
+        ] as never,
         adminPubkeys: [account.pubkey],
         ciphersuiteId,
         onUnverifiableCommit: "retry",
@@ -633,9 +643,12 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       const valid = buildIncomingAdd(account, [
         makeLeafAppComponentsExtension(proof),
       ]);
-      expect(callback(legacyStandalone(valid.proposals[0]!.proposal))).toBe(
-        "accept",
-      );
+      expect(
+        callback({
+          kind: "proposal",
+          proposal: valid.proposals[0]!,
+        } as never),
+      ).toBe("accept");
 
       // UPD-04/D-10 (Phase 9): standalone Update admission is no longer
       // deferred to a later commit. This bare-object proposal carries no
@@ -676,12 +689,13 @@ describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md
       const proposalWithSender = valid.proposals[0]!;
 
       wrapped.take();
-      const result = wrapped.callback(
-        legacyStandalone(proposalWithSender.proposal),
-      );
+      const result = wrapped.callback({
+        kind: "proposal",
+        proposal: proposalWithSender,
+      } as never);
       expect(result).toBe("accept");
       const captured = wrapped.take();
-      expect(captured.proposals).toEqual([proposalWithSender.proposal]);
+      expect(captured.proposals).toEqual([proposalWithSender]);
       expect(captured.committerLeafIndex).toBeUndefined();
     });
   });

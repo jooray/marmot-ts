@@ -7,6 +7,7 @@ import {
   encodeDeliveredEvidence,
 } from "../delivered-payload-store.js";
 import {
+  appDataUpdateProposalType,
   defaultCryptoProvider,
   defaultProposalTypes,
   selfRemoveProposalType,
@@ -23,6 +24,8 @@ import { NostrGroupPeeler } from "../../group/nostr-peeler.js";
 import { createGroupEvent } from "../../../core/group-message.js";
 import { DEFAULT_CONVERGENCE_POLICY } from "../../../core/convergence.js";
 import { testAccount } from "../../../__tests__/helpers/test-accounts.js";
+import { encodeAdminPolicyV1 } from "../../../core/components/admin-policy.js";
+import { GROUP_ADMIN_POLICY_COMPONENT_ID } from "../../../core/components/ids.js";
 import { createCredential } from "../../../core/credential.js";
 import { createSimpleGroup } from "../../../core/group.js";
 import { generateKeyPackage } from "../../../core/key-package.js";
@@ -123,6 +126,54 @@ async function fixture(
       now += 100;
     },
   };
+}
+
+/**
+ * Adds a second member and makes it the only admin in one commit, so the
+ * fixture's account can leave: an active admin's SelfRemove is refused.
+ */
+async function handOffAdmin(f: Awaited<ReturnType<typeof fixture>>) {
+  const member = testAccount(11);
+  const memberKp = await generateKeyPackage({
+    credential: createCredential(member.pubkey),
+    signer: member.signer,
+    ciphersuiteImpl: f.options.ciphersuite,
+  });
+  const addWork = (
+    await f.session.send({
+      kind: "commit",
+      actorPubkey: testAccount(6).pubkey,
+      extraProposals: [
+        {
+          proposalType: defaultProposalTypes.add,
+          add: { keyPackage: memberKp.publicPackage },
+        },
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
+            operation: "update",
+            update: encodeAdminPolicyV1([member.pubkey]),
+          },
+        },
+      ],
+    })
+  ).publish[0];
+  if (addWork.kind !== "groupEvolution" || !addWork.welcome)
+    throw new Error("expected Welcome");
+  await f.runtime.publishWork(addWork);
+  const context = {
+    cipherSuite: f.options.ciphersuite,
+    authService: marmotAuthService,
+  };
+  const peerState = await joinGroup({
+    context,
+    welcome: addWork.welcome.welcome!,
+    keyPackage: memberKp.publicPackage,
+    privateKeys: memberKp.privatePackage,
+    ratchetTree: undefined,
+  });
+  return { context, peerState };
 }
 
 describe("settled session retention", () => {
@@ -384,6 +435,7 @@ describe("settled session retention", () => {
     async (mode) => {
       const f = await fixture();
       try {
+        await handOffAdmin(f);
         const effects =
           mode === "leave"
             ? await f.session.leave(testAccount(6).pubkey)
@@ -400,7 +452,8 @@ describe("settled session retention", () => {
         for (let step = 0; step < 6; step++) {
           await f.advance();
           if (step >= 1) {
-            expect(f.session.historyTree.oldestEpoch()).toBe(step);
+            // The admin hand-off commit is epoch 1.
+            expect(f.session.historyTree.oldestEpoch()).toBe(step + 1);
             expect(f.session.historyTree.size).toBe(2);
           }
         }
@@ -415,38 +468,8 @@ describe("settled session retention", () => {
     async (outcome) => {
       const f = await fixture();
       try {
-        const member = testAccount(11);
-        const memberKp = await generateKeyPackage({
-          credential: createCredential(member.pubkey),
-          signer: member.signer,
-          ciphersuiteImpl: f.options.ciphersuite,
-        });
-        const addWork = (
-          await f.session.send({
-            kind: "commit",
-            actorPubkey: testAccount(6).pubkey,
-            extraProposals: [
-              {
-                proposalType: defaultProposalTypes.add,
-                add: { keyPackage: memberKp.publicPackage },
-              },
-            ],
-          })
-        ).publish[0];
-        if (addWork.kind !== "groupEvolution" || !addWork.welcome)
-          throw new Error("expected Welcome");
-        await f.runtime.publishWork(addWork);
-        const context = {
-          cipherSuite: f.options.ciphersuite,
-          authService: marmotAuthService,
-        };
-        let peerState = await joinGroup({
-          context,
-          welcome: addWork.welcome.welcome!,
-          keyPackage: memberKp.publicPackage,
-          privateKeys: memberKp.privatePackage,
-          ratchetTree: undefined,
-        });
+        const { context, peerState: joined } = await handOffAdmin(f);
+        let peerState = joined;
         const effects = await f.session.leave(testAccount(6).pubkey);
         const work = effects.publish[0];
         if (work.kind !== "proposal")

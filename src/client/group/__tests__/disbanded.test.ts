@@ -3,6 +3,7 @@ import {
   defaultCryptoProvider,
   getCiphersuiteImpl,
   createCommit,
+  createProposal,
   defaultProposalTypes,
   joinGroup,
   unsafeTestingAuthenticationService,
@@ -32,6 +33,7 @@ import { testAccount } from "../../../__tests__/helpers/test-accounts.js";
 import { deserializeClientState } from "../../../core/client-state.js";
 import { GROUP_PROFILE_COMPONENT_ID } from "../../../core/components/ids.js";
 import { GroupSession } from "../../session/group-session.js";
+import { createGroupEvent } from "../../../core/group-event.js";
 
 async function peers() {
   const admin = testAccount(6),
@@ -369,33 +371,33 @@ describe("public disband terminal contract", () => {
             : extension;
         },
       );
-    const leaver = new GroupSession({
-      state: f.adminState,
-      ciphersuite: f.impl,
-      store: new InMemoryKeyValueStore<Uint8Array>(),
-    });
     const store = new InMemoryKeyValueStore<Uint8Array>();
     const observer = new GroupSession({
       state: f.memberState,
       ciphersuite: f.impl,
       store,
     });
-    const proposal = await leaver.send({
-      kind: "proposal",
+    // An active admin's SelfRemove is refused before sending, so build it
+    // directly: the observer must neither stage it nor commit it.
+    const { message } = await createProposal({
+      context: {
+        cipherSuite: f.impl,
+        authService: unsafeTestingAuthenticationService,
+      },
+      state: f.adminState,
+      wireAsPublicMessage: true,
       proposal: { proposalType: selfRemoveProposalType },
     });
+    const envelope = await createGroupEvent({
+      message,
+      state: f.adminState,
+      ciphersuite: f.impl,
+    });
     const results = [];
-    for await (const result of observer.ingest([proposal.publish[0].envelope]))
+    for await (const result of observer.ingest([envelope]))
       results.push(result);
-    expect(results.some((r) => r.kind === "processed")).toBe(true);
     expect(results.some((r) => r.kind === "autoCommit")).toBe(false);
-    expect(
-      Object.keys(
-        deserializeClientState((await store.getItem(bytesToHex(observer.id)))!)
-          .unappliedProposals,
-      ),
-    ).toHaveLength(1);
-    leaver.dispose();
+    expect(Object.keys(observer.state.unappliedProposals)).toHaveLength(0);
     observer.dispose();
   });
 

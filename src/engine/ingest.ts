@@ -34,6 +34,7 @@ import {
   type CommitOrderingKey,
   DEFAULT_CONVERGENCE_POLICY,
   commitDigest,
+  commitOrderingPriority,
   compareCommitOrderingKeys,
 } from "../core/convergence.js";
 import { getCredentialPubkey } from "../core/credential.js";
@@ -1041,6 +1042,9 @@ export async function* ingestEnvelopes<TEnvelope>(
             removalAttribution: {
               version: 2,
               removalDigest: bytesToHex(acceptedCommitDigest),
+              removingPriority: commitOrderingPriority(
+                capturedCommit.proposals,
+              ),
               ...removalParent,
             },
           };

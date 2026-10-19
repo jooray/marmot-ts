@@ -40,7 +40,10 @@ import {
   type UnreadInvite,
 } from "./invite-manager.js";
 import type { StoredKeyPackage } from "./key-package-manager.js";
-import { KeyPackageManager } from "./key-package-manager.js";
+import {
+  KeyPackageManager,
+  type KeyPackageManagerOptions,
+} from "./key-package-manager.js";
 import type { NostrNetworkInterface } from "./nostr-interface.js";
 import { InMemoryKeyValueStore } from "../extra/in-memory-key-value-store.js";
 import { defaultVerifyEvent, type VerifyEventMethod } from "./verify.js";
@@ -151,6 +154,8 @@ export type MarmotClientOptions<
   inviteStore?: GenericKeyValueStore<StoredInviteEntry>;
   /** The crypto provider to use for cryptographic operations */
   cryptoProvider?: CryptoProvider;
+  /** Load a persisted installation signing identity for KeyPackages. */
+  getSignatureKeyPair?: KeyPackageManagerOptions["getSignatureKeyPair"];
   /** The nostr relay pool to use for the client. Should implement GroupNostrInterface for group operations. */
   network: NostrNetworkInterface;
   /** Optional forensic audit sink inherited by groups. Omitted by default. */
@@ -228,6 +233,9 @@ export class MarmotClient<
       signer: options.signer,
       network: options.network,
       clientId: options.clientId,
+      cryptoProvider: this.cryptoProvider,
+      capabilities: options.capabilities,
+      getSignatureKeyPair: options.getSignatureKeyPair,
       verifyEvent,
       hasAdoptedGroup: async (groupId) =>
         (await options.groupStateStore.getItem(bytesToHex(groupId))) !== null,

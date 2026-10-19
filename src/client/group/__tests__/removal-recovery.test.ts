@@ -493,6 +493,7 @@ describe("authenticated retained-anchor removal recovery", () => {
     expect(f.removed.removalAttribution).toMatchObject({
       version: 2,
       removingCommitter: testAccount(6).pubkey,
+      removingPriority: "privileged",
       removalDigest: bytesToHex(
         commitDigest(encode(mlsMessageEncoder, f.removal.commit)),
       ),
