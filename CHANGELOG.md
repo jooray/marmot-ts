@@ -2,25 +2,22 @@
 
 ## Unreleased
 
-### Fixed
+## 0.7.0
 
-- Reject `app_components` lists whose ids are not in ascending order, matching MDK, so marmot-ts and White Noise members agree on which GroupContexts, LeafNodes and KeyPackages are valid.
-- Enforce the spec's 16-relay limit on Nostr routing state when encoding and decoding. Larger relay lists made Welcomes unjoinable and routing updates fail for White Noise members. The limit is exported as `NOSTR_ROUTING_MAX_RELAYS`.
-- Group avatar URLs on localhost or private-network hosts are now valid group state, as the spec requires and MDK accepts. Previously marmot-ts members rejected a White Noise commit setting such an avatar and fell an epoch behind. Call the new `rejectUnsafeGroupAvatarContactUrl()` before fetching or rendering an avatar.
-- Reject URLs ending in an empty fragment (a trailing `#`) in avatar URLs, encrypted-media endpoints and Nostr routing relays, as MDK does. A group created with such an avatar could not be joined by White Noise users.
-- Messages and commits sent while a group is settling after a commit are now always published once the group settles, even when the settle timer fires slightly early or retained messages are processed at the same time. Previously such sends could stay pending indefinitely.
-- New groups keep the app-data dictionary last in their GroupContext extensions, matching MDK, so renames, admin changes and relay updates no longer split White Noise members off the group. Existing dictionary-first groups are not migrated yet.
-- Application messages are no longer lost when they are read up to five commits after being sent, or while catching up on a burst of more than ten messages. MLS key retention now matches the spec and MDK: 5 past epochs, 100 skipped generations and a 1000-step forward limit.
-- A member's message read after the commit that removed them is now delivered instead of dropped as `invalid-app-payload`. This mostly affected a member's last message before leaving, which often arrives in the same batch as their removal.
-- `GroupsManager` now drops kind-445 events carrying tags other than the single `h` tag and at most one NIP-40 `expiration` tag, reporting them as `tag-cardinality` rejections. MDK drops these before decryption, so a member could otherwise show marmot-ts users messages White Noise users never see.
+### Added
 
-### Breaking
-
-- `createGroup` now throws `InvalidGroupContextExtensionError` for a caller-supplied `app_data_dictionary` extension or duplicate extension types, including a second `required_capabilities`. Put dictionary data in `components` and pass at most one extension of each type in `extensions`.
-
-## 0.6.0
-
-Prepared release notes; publication has not occurred. This npm version includes account-proof, group-image, and reliability changes delivered across the project milestones; it is separate from the v2.2 reliability-and-debt-closure milestone.
+- Follow the dedicated [Group images guide](docs/client/group-images.md) for explicit Blossom configuration, verified reads, cancellation, replacement and snapshot-safe display.
+- Clear encrypted Blossom image metadata while preserving URL avatars. Clear leaves remote blobs and previously shared upload credentials intact; remote deletion and credential revocation require application/service policy.
+- Replace and clear encrypted group images through the normal MLS confirmation workflow, and retrieve verified image bytes through `MarmotGroup.image` using explicit application endpoints.
+- Encode, encrypt and authenticate encrypted Blossom group-image metadata through pure core helpers, with independent image credentials and ciphertext integrity checks.
+- Read a canonical group image source that preserves URL-avatar precedence and identifies complete Blossom metadata snapshots without downloading image bytes.
+- Import `marmotAuthService` from the root or `/core` entrypoint for MLS basic-credential identity and curve validation. Account-proof binding and group authorization remain separate Marmot checks.
+- Use `MarmotGroupEngine` from the engine entrypoint to manage group state without a Nostr transport, with changes applied after successful publication.
+- Use `GroupSession`, `MarmotGroup.session`, and `MarmotGroup.runtime` for direct control over group send, receive, persistence, and publication. `GroupsManager` adds session and runtime helpers, including Welcome delivery.
+- Encrypt and decrypt group media with `GroupMediaService`, including a cache for decrypted media.
+- Enable optional forensic audit logging to investigate group activity.
+- Check group compatibility through `profileSupport` and identify older KeyPackages through `ListedKeyPackage.nonCurrent`.
+- Receive account identity proof rejection details and group removal or disband notifications during recovery.
 
 ### Changed
 
@@ -46,23 +43,6 @@ Prepared release notes; publication has not occurred. This npm version includes 
 
 - Group destruction now waits for admitted lifecycle storage writes and refuses stale disband, lifecycle enablement, leave, and publication work, preventing deleted groups from recreating local data or publishing a terminal commit after closure.
 
-### Added
-
-- Follow the dedicated [Group images guide](docs/client/group-images.md) for explicit Blossom configuration, verified reads, cancellation, replacement and snapshot-safe display.
-- Clear encrypted Blossom image metadata while preserving URL avatars. Clear leaves remote blobs and previously shared upload credentials intact; remote deletion and credential revocation require application/service policy.
-- Replace and clear encrypted group images through the normal MLS confirmation workflow, and retrieve verified image bytes through `MarmotGroup.image` using explicit application endpoints.
-- Encode, encrypt and authenticate encrypted Blossom group-image metadata through pure core helpers, with independent image credentials and ciphertext integrity checks.
-- Read a canonical group image source that preserves URL-avatar precedence and identifies complete Blossom metadata snapshots without downloading image bytes.
-- Import `marmotAuthService` from the root or `/core` entrypoint for MLS basic-credential identity and curve validation. Account-proof binding and group authorization remain separate Marmot checks.
-- Use `MarmotGroupEngine` from the engine entrypoint to manage group state without a Nostr transport, with changes applied after successful publication.
-- Use `GroupSession`, `MarmotGroup.session`, and `MarmotGroup.runtime` for direct control over group send, receive, persistence, and publication. `GroupsManager` adds session and runtime helpers, including Welcome delivery.
-- Encrypt and decrypt group media with `GroupMediaService`, including a cache for decrypted media.
-- Enable optional forensic audit logging to investigate group activity.
-- Check group compatibility through `profileSupport` and identify older KeyPackages through `ListedKeyPackage.nonCurrent`.
-- Receive account identity proof rejection details and group removal or disband notifications during recovery.
-
-### Changed
-
 - Group image replacements and clears share a bounded FIFO queue tied to the loaded group instance. Unloading or destroying a group closes its image service and prevents queued changes from reaching a replacement instance.
 
 - Encrypted group-image reads share work only across compatible caller profiles, keep cancellation independent, and cache verified plaintext in bounded memory. Cached and shared results recheck current policy and canonical image metadata before delivery.
@@ -79,6 +59,16 @@ Prepared release notes; publication has not occurred. This npm version includes 
 - Sign account identity proofs with the client's own signer using the current `0x8009` member proof format.
 
 ### Fixed
+
+- Reject `app_components` lists whose ids are not in ascending order, matching MDK, so marmot-ts and White Noise members agree on which GroupContexts, LeafNodes and KeyPackages are valid.
+- Enforce the spec's 16-relay limit on Nostr routing state when encoding and decoding. Larger relay lists made Welcomes unjoinable and routing updates fail for White Noise members. The limit is exported as `NOSTR_ROUTING_MAX_RELAYS`.
+- Group avatar URLs on localhost or private-network hosts are now valid group state, as the spec requires and MDK accepts. Previously marmot-ts members rejected a White Noise commit setting such an avatar and fell an epoch behind. Call the new `rejectUnsafeGroupAvatarContactUrl()` before fetching or rendering an avatar.
+- Reject URLs ending in an empty fragment (a trailing `#`) in avatar URLs, encrypted-media endpoints and Nostr routing relays, as MDK does. A group created with such an avatar could not be joined by White Noise users.
+- Messages and commits sent while a group is settling after a commit are now always published once the group settles, even when the settle timer fires slightly early or retained messages are processed at the same time. Previously such sends could stay pending indefinitely.
+- New groups keep the app-data dictionary last in their GroupContext extensions, matching MDK, so renames, admin changes and relay updates no longer split White Noise members off the group. Existing dictionary-first groups are not migrated yet.
+- Application messages are no longer lost when they are read up to five commits after being sent, or while catching up on a burst of more than ten messages. MLS key retention now matches the spec and MDK: 5 past epochs, 100 skipped generations and a 1000-step forward limit.
+- A member's message read after the commit that removed them is now delivered instead of dropped as `invalid-app-payload`. This mostly affected a member's last message before leaving, which often arrives in the same batch as their removal.
+- `GroupsManager` now drops kind-445 events carrying tags other than the single `h` tag and at most one NIP-40 `expiration` tag, reporting them as `tag-cardinality` rejections. MDK drops these before decryption, so a member could otherwise show marmot-ts users messages White Noise users never see.
 
 - Removal recovery uses the authenticated committer tie-breaker for retained branches and removal evidence, matching normal fork selection. Older removal records remain conservative when their committer identity is unavailable.
 
@@ -118,6 +108,8 @@ Prepared release notes; publication has not occurred. This npm version includes 
 - Keep admin restrictions enforced when optional group metadata is malformed, and reject invalid group component updates before applying them.
 
 ### Breaking changes
+
+- `createGroup` now throws `InvalidGroupContextExtensionError` for a caller-supplied `app_data_dictionary` extension or duplicate extension types, including a second `required_capabilities`. Put dictionary data in `components` and pass at most one extension of each type in `extensions`.
 
 - Successful `isCommitMessage` and `isProposalMessage` guards now narrow to a public/private union. Consumers that read `privateMessage` directly after a guard must branch on `message.wireformat`: use `publicMessage.content` for `mls_public_message` and `privateMessage` for `mls_private_message`. `isApplicationMessage` remains private-only.
 
