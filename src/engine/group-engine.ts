@@ -83,6 +83,7 @@ import {
   type AppWitness,
   type BranchCandidate,
   commitDigest,
+  commitOrderingPriority,
   type ConvergencePolicy,
   DEFAULT_CONVERGENCE_POLICY,
   isWitnessEligible,
@@ -111,9 +112,10 @@ import {
   type AuditTransportWireEnvelope,
 } from "../audit/index.js";
 import {
+  framedCommitProposals,
+  framedCommitProposalsWithSender,
   framedContentType,
   framedEpoch,
-  framedCommitProposals,
 } from "./wire-format.js";
 import {
   validateGroupImageLegality,
@@ -2169,18 +2171,12 @@ export class MarmotGroupEngine<TEnvelope> {
       );
     }
 
-    const nonAdminShape = decideCommitAuthorization({
-      actorPubkey,
-      actorLeafIndex: Number(actorLeaf),
-      adminPubkeys: [],
-      proposals: committedWithSenders,
-    });
     return {
       extraProposals,
       committedProposals,
       committedWithSenders,
       committer: actorPubkey,
-      priority: nonAdminShape.authorized ? "ordinary" : "privileged",
+      priority: commitOrderingPriority(committedWithSenders),
       commitState,
     };
   }
@@ -4231,9 +4227,9 @@ export class MarmotGroupEngine<TEnvelope> {
       if (replay.kind === "deferred") return undefined;
       if (replay.kind === "invalid") {
         candidates = candidates.filter((c) => c.id !== winner.id);
-        const prefix =
-          replay.lastValidTag &&
-          this.#treePrefixCandidate(winner, replay.lastValidTag);
+        const prefix = replay.lastValidTag
+          ? await this.#treePrefixCandidate(winner, replay.lastValidTag)
+          : undefined;
         if (prefix && !candidates.some((c) => c.id === prefix.id)) {
           prefix.tipCommitter = await treeTipCommitter(this.#tree, prefix.id);
           if (!prefix.tipCommitter) return undefined;
@@ -4331,12 +4327,18 @@ export class MarmotGroupEngine<TEnvelope> {
       witnessEnvelopes.length > 0
         ? await this.#gatherTreeWitnesses(set, witnessEnvelopes)
         : undefined;
-    const candidates: BranchCandidate[] = witnessesByTip
-      ? set.candidates.map((c) => ({
-          ...c,
-          appWitnesses: witnessesByTip.get(c.id) ?? [],
-        }))
-      : set.candidates;
+    // The tree's light index carries only epoch and digest. The tip ordering
+    // metadata (`tip_priority`, `tip_committer`) ranks above the digest, so it
+    // is read from the stored parent snapshot and commit before scoring;
+    // without it this pass and pool replay order the same branches
+    // differently and the tip flips between them.
+    const candidates: BranchCandidate[] = await Promise.all(
+      set.candidates.map(async (c) => ({
+        ...c,
+        ...(await this.#treeTipOrdering(c.id)),
+        appWitnesses: witnessesByTip?.get(c.id) ?? c.appWitnesses,
+      })),
+    );
 
     // CR-01: select among ADOPTABLE branches only. A permanently invalid link
     // (an illegal edge persisted by an older build, say) is never adopted,
@@ -4384,7 +4386,7 @@ export class MarmotGroupEngine<TEnvelope> {
           outcome.lastValidTag === undefined ||
           onCurrentPath.has(outcome.lastValidTag)
             ? undefined
-            : this.#treePrefixCandidate(winner, outcome.lastValidTag);
+            : await this.#treePrefixCandidate(winner, outcome.lastValidTag);
         if (prefix && !remaining.some((c) => c.id === prefix.id))
           remaining = [...remaining, prefix];
       }
@@ -4482,16 +4484,64 @@ export class MarmotGroupEngine<TEnvelope> {
   }
 
   /**
+   * The authenticated ordering metadata of the commit that produced tree node
+   * `tag`: the committer's account identity, resolved against the parent
+   * snapshot's ratchet tree, and the commit's `tip_priority`, classified from
+   * its inline proposals plus the parent's staged proposals it references.
+   * Fields that cannot be derived are omitted rather than guessed; the stored
+   * own-commit stamp supplies the priority when the references no longer
+   * resolve.
+   *
+   * @see refs/marmot/protocol-core/convergence.md "Candidate branches"
+   */
+  async #treeTipOrdering(
+    tag: string,
+  ): Promise<Pick<BranchCandidate, "tipCommitter" | "tipPriority">> {
+    const parentTag = this.#tree.parentOf(tag);
+    if (parentTag === undefined) return {};
+    const [parent, message] = await Promise.all([
+      this.#tree.stateAt(parentTag),
+      this.#tree.commitMessageOf(tag),
+    ]);
+    if (!parent || !message) return {};
+    const framed = framedCommitProposalsWithSender(message, parent);
+    const senderLeaf =
+      framed?.senderLeafIndex ?? this.#tree.node(tag)?.edge?.senderLeafIndex;
+    let tipCommitter: Uint8Array | undefined;
+    if (senderLeaf !== undefined) {
+      try {
+        tipCommitter = hexToBytes(
+          getCredentialPubkey(
+            getCredentialFromLeafIndex(
+              parent.ratchetTree,
+              senderLeaf as LeafIndex,
+            ),
+          ),
+        );
+      } catch {
+        tipCommitter = undefined;
+      }
+    }
+    const tipPriority = framed
+      ? commitOrderingPriority(framed.proposals)
+      : (await this.#tree.ownCommitStampOf(tag))?.priority;
+    return {
+      ...(tipCommitter ? { tipCommitter } : {}),
+      ...(tipPriority ? { tipPriority } : {}),
+    };
+  }
+
+  /**
    * WR-02: `candidate` truncated to its legal prefix ending at node `tag`, with
    * the same scoring inputs `buildTreeBranchSet` derives for a tip (the node's
    * epoch and its own edge digest). Only witnesses that decrypt on the prefix
    * and remain eligible for its shorter tip are kept. `undefined` when the
    * tree lacks the node's epoch or edge.
    */
-  #treePrefixCandidate(
+  async #treePrefixCandidate(
     candidate: BranchCandidate,
     tag: string,
-  ): BranchCandidate | undefined {
+  ): Promise<BranchCandidate | undefined> {
     const tipEpoch = this.#tree.epochOf(tag);
     const tipDigest = this.#tree.node(tag)?.edge?.commitDigest;
     if (tipEpoch === undefined || tipDigest === undefined) return undefined;
@@ -4500,6 +4550,7 @@ export class MarmotGroupEngine<TEnvelope> {
       forkEpoch: candidate.forkEpoch,
       tipEpoch,
       tipDigest,
+      ...(await this.#treeTipOrdering(tag)),
       appWitnesses: candidate.appWitnesses.filter(
         (witness) =>
           witness.epoch <= tipEpoch &&
