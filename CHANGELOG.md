@@ -7,6 +7,7 @@
 - Groups created before 0.7.0, with the app-data dictionary first in their GroupContext extensions, can now be renamed and have their admins, relays or other components changed without splitting off White Noise members. The first such commit by a marmot-ts admin also moves the dictionary last, so later updates need no repair. Groups that already split on an earlier update are not recovered.
 - Refuse to invite (or found a group with) a KeyPackage whose leaf does not advertise every app component the group requires, or a required agent-text-stream role. MDK members reject such an Add commit, so the group forked: marmot-ts members moved to the next epoch and White Noise members did not. `evaluateKeyPackageForGroup()` now reports missing app components too, and the check is exported as `missingGroupRequirements()`.
 - Application messages are decoded as strictly as MDK: payloads with a duplicate member, an uppercase `id` or `pubkey`, a `created_at` or `kind` that is not a plain non-negative integer (`1.5`, `1.0`, `1e9`, `-1`), an unpaired surrogate, invalid UTF-8 or a leading BOM are now rejected. White Noise already dropped these, so a member could show marmot-ts users messages White Noise users never saw.
+- An admin removed by another admin now accepts its removal and sees the group as left. Previously its client rejected the removal commit as an `admin-leaf-coupling` violation and kept presenting the group as active.
 
 ### Changed
 
