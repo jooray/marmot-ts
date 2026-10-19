@@ -12,6 +12,7 @@
 - New groups keep the app-data dictionary last in their GroupContext extensions, matching MDK, so renames, admin changes and relay updates no longer split White Noise members off the group. Existing dictionary-first groups are not migrated yet.
 - Application messages are no longer lost when they are read up to five commits after being sent, or while catching up on a burst of more than ten messages. MLS key retention now matches the spec and MDK: 5 past epochs, 100 skipped generations and a 1000-step forward limit.
 - A member's message read after the commit that removed them is now delivered instead of dropped as `invalid-app-payload`. This mostly affected a member's last message before leaving, which often arrives in the same batch as their removal.
+- `GroupsManager` now drops kind-445 events carrying tags other than the single `h` tag and at most one NIP-40 `expiration` tag, reporting them as `tag-cardinality` rejections. MDK drops these before decryption, so a member could otherwise show marmot-ts users messages White Noise users never see.
 
 ### Breaking
 
