@@ -88,8 +88,9 @@ migration guidance for breaking changes. Internal-only maintenance does not need
    npm, or the GitHub release exists), so re-pushing a tag or re-running the workflow
    does not republish or duplicate a release.
 6. Mark the release on Nostr with `ngit release publish <version> --tag v<version>`.
-   The manifest at `.ngit/release.yaml` holds the application identity and reads the
-   notes for the version from `CHANGELOG.md`.
+   The manifest at `.ngit/release.yaml` holds the application identity, reads the
+   notes for the version from `CHANGELOG.md`, and links the version's npm tarball
+   as a platform-agnostic URL asset (nothing is uploaded to Blossom).
 
 `pnpm release` publishes the root library package locally; it does not publish
 workspace packages. `pnpm release-next` continues to publish temporary prereleases
