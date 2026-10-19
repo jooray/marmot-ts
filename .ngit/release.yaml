@@ -1,0 +1,6 @@
+schema: 1
+application: marmot-ts
+name: marmot-ts
+summary: Marmot protocol implementation in TypeScript - MLS end-to-end encryption groups over Nostr
+repository: nostr://npub1ye5ptcxfyyxl5vjvdjar2ua3f0hynkjzpx552mu5snj3qmx5pzjscpknpr/git.shakespeare.diy/marmot-ts
+release_notes: CHANGELOG.md
