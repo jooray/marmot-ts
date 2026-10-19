@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  appDataDictionaryExtensionType,
+  createCommit,
   defaultCryptoProvider,
   defaultExtensionTypes,
   type ExtensionRequiredCapabilities,
@@ -8,10 +10,16 @@ import {
 
 import { createCredential } from "../credential.js";
 import { generateKeyPackage } from "../key-package.js";
-import { createGroup, createSimpleGroup } from "../group.js";
+import {
+  createGroup,
+  createSimpleGroup,
+  InvalidGroupContextExtensionError,
+} from "../group.js";
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
 import { marmotRequiredCapabilitiesExtension } from "../capabilities.js";
 import { getMarmotGroupView } from "../client-state.js";
+import { marmotAuthService } from "../auth-service.js";
+import { proposeUpdateMetadata } from "../../client/group/proposals/update-metadata.js";
 import {
   ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
   adminPolicyEntry,
@@ -24,6 +32,7 @@ import {
   groupAvatarUrlEntry,
   groupProfileEntry,
   messageRetentionEntry,
+  makeAppComponentsExtension,
   nostrRoutingEntry,
 } from "../components/index.js";
 
@@ -58,6 +67,13 @@ describe("group construction", () => {
     });
 
     const view = getMarmotGroupView(clientState);
+    // Match MDK's create-time GroupContext order (group_lifecycle.rs).
+    expect(
+      clientState.groupContext.extensions.map((e) => e.extensionType),
+    ).toEqual([
+      defaultExtensionTypes.required_capabilities,
+      appDataDictionaryExtensionType,
+    ]);
     expect(view).toBeTruthy();
     expect(view?.name).toBe("Test Group");
     expect(view?.nostrGroupId).toEqual(nostrGroupId);
@@ -116,6 +132,10 @@ describe("group construction", () => {
       adminPubkeys: [adminAccount.pubkey],
     });
     const { extensions } = clientState.groupContext;
+    expect(extensions.map((e) => e.extensionType)).toEqual([
+      defaultExtensionTypes.required_capabilities,
+      appDataDictionaryExtensionType,
+    ]);
 
     expect(getAppComponents(extensions)).toContain(
       ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
@@ -136,6 +156,143 @@ describe("group construction", () => {
     expect(required!.extensionData.extensionTypes.includes(0xf2f1)).toBe(false);
 
     expect(getGroupProfileSupport(extensions)).toEqual({ kind: "supported" });
+  });
+
+  it.each([false, true])(
+    "keeps the dictionary after caller extensions (required capabilities supplied: %s)",
+    async (suppliedRequiredCapabilities) => {
+      const account = testAccount(6);
+      const impl = await getCiphersuiteImpl(
+        "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+        defaultCryptoProvider,
+      );
+      const kp = await generateKeyPackage({
+        credential: createCredential(account.pubkey),
+        ciphersuiteImpl: impl,
+        signer: account.signer,
+      });
+      const extra = {
+        extensionType: 0xff01,
+        extensionData: Uint8Array.of(1, 2, 3),
+      };
+      const required = marmotRequiredCapabilitiesExtension();
+      const { clientState } = await createGroup({
+        creatorKeyPackage: kp,
+        components: [groupProfileEntry({ name: "Custom", description: "" })],
+        extensions: suppliedRequiredCapabilities ? [extra, required] : [extra],
+        ciphersuiteImpl: impl,
+      });
+      expect(
+        clientState.groupContext.extensions.map((e) => e.extensionType),
+      ).toEqual([
+        ...(suppliedRequiredCapabilities
+          ? [extra.extensionType, required.extensionType]
+          : [required.extensionType, extra.extensionType]),
+        appDataDictionaryExtensionType,
+      ]);
+      expect(clientState.groupContext.extensions).toContainEqual(extra);
+      expect(getMarmotGroupView(clientState)?.name).toBe("Custom");
+    },
+  );
+
+  it.each([
+    {
+      name: "a caller-supplied app_data_dictionary",
+      extensions: [
+        makeAppComponentsExtension([
+          groupProfileEntry({ name: "Caller dictionary", description: "" }),
+        ]),
+      ],
+      error:
+        "app_data_dictionary must not be supplied in extensions; put dictionary data in components",
+    },
+    {
+      name: "duplicate required_capabilities extensions",
+      extensions: [
+        marmotRequiredCapabilitiesExtension(),
+        marmotRequiredCapabilitiesExtension(),
+      ],
+      error: "Duplicate group context extension type: 3",
+    },
+    {
+      name: "duplicate custom extension types with different data",
+      extensions: [
+        { extensionType: 0xff01, extensionData: Uint8Array.of(1) },
+        { extensionType: 0xff01, extensionData: Uint8Array.of(2) },
+      ],
+      error: "Duplicate group context extension type: 65281",
+    },
+  ])("rejects $name", async ({ extensions, error }) => {
+    const account = testAccount(6);
+    const impl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const kp = await generateKeyPackage({
+      credential: createCredential(account.pubkey),
+      ciphersuiteImpl: impl,
+      signer: account.signer,
+    });
+
+    const result = createGroup({
+      creatorKeyPackage: kp,
+      components: [groupProfileEntry({ name: "Generated", description: "" })],
+      extensions,
+      ciphersuiteImpl: impl,
+    });
+    await expect(result).rejects.toBeInstanceOf(
+      InvalidGroupContextExtensionError,
+    );
+    await expect(result).rejects.toThrow(error);
+  });
+
+  it("keeps the dictionary last through rename and admin metadata commits", async () => {
+    const account = testAccount(6);
+    const impl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const kp = await generateKeyPackage({
+      credential: createCredential(account.pubkey),
+      ciphersuiteImpl: impl,
+      signer: account.signer,
+    });
+    const { clientState } = await createSimpleGroup(kp, impl, "Original", {
+      description: "Unchanged description",
+      relays: ["wss://relay.example.com"],
+    });
+    const originalView = getMarmotGroupView(clientState)!;
+    let state = clientState;
+    const admins = [account.pubkey, testAccount(0).pubkey].sort();
+    for (const metadata of [{ name: "Renamed" }, { adminPubkeys: admins }]) {
+      const proposals = await proposeUpdateMetadata(metadata)({
+        state,
+        ciphersuite: impl,
+        groupData: getMarmotGroupView(state)!,
+      });
+      const { newState } = await createCommit({
+        context: { cipherSuite: impl, authService: marmotAuthService },
+        state,
+        extraProposals: proposals,
+      });
+      state = newState;
+      expect(state.groupContext.extensions.map((e) => e.extensionType)).toEqual(
+        [
+          defaultExtensionTypes.required_capabilities,
+          appDataDictionaryExtensionType,
+        ],
+      );
+      const view = getMarmotGroupView(state)!;
+      expect(view.name).toBe("Renamed");
+      expect(view.adminPubkeys).toEqual(
+        metadata.adminPubkeys ?? [account.pubkey],
+      );
+      expect(view.description).toBe(originalView.description);
+      expect(view.relays).toEqual(originalView.relays);
+      expect(view.nostrGroupId).toEqual(originalView.nostrGroupId);
+      expect(view.protocolLifecycle).toBe("active");
+    }
+    expect(state.groupContext.epoch).toBe(clientState.groupContext.epoch + 2n);
   });
 
   it("surfaces avatar, encrypted-media policy, and retention through the group view", async () => {

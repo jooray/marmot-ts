@@ -9,6 +9,11 @@
 - Group avatar URLs on localhost or private-network hosts are now valid group state, as the spec requires and MDK accepts. Previously marmot-ts members rejected a White Noise commit setting such an avatar and fell an epoch behind. Call the new `rejectUnsafeGroupAvatarContactUrl()` before fetching or rendering an avatar.
 - Reject URLs ending in an empty fragment (a trailing `#`) in avatar URLs, encrypted-media endpoints and Nostr routing relays, as MDK does. A group created with such an avatar could not be joined by White Noise users.
 - Messages and commits sent while a group is settling after a commit are now always published once the group settles, even when the settle timer fires slightly early or retained messages are processed at the same time. Previously such sends could stay pending indefinitely.
+- New groups keep the app-data dictionary last in their GroupContext extensions, matching MDK, so renames, admin changes and relay updates no longer split White Noise members off the group. Existing dictionary-first groups are not migrated yet.
+
+### Breaking
+
+- `createGroup` now throws `InvalidGroupContextExtensionError` for a caller-supplied `app_data_dictionary` extension or duplicate extension types, including a second `required_capabilities`. Put dictionary data in `components` and pass at most one extension of each type in `extensions`.
 
 ## 0.6.0
 

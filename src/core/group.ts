@@ -4,6 +4,7 @@ import {
   CiphersuiteImpl,
   ClientState,
   ComponentData,
+  appDataDictionaryExtensionType,
   createGroup as MLSCreateGroup,
   GroupContextExtension,
 } from "ts-mls";
@@ -24,6 +25,14 @@ import {
 import { getCredentialPubkey } from "./credential.js";
 import { CompleteKeyPackage } from "./key-package.js";
 
+/** Thrown when caller-supplied GroupContext extensions are invalid. */
+export class InvalidGroupContextExtensionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidGroupContextExtensionError";
+  }
+}
+
 export interface CreateGroupParams {
   /** Creator's complete key package (public + private) */
   creatorKeyPackage: CompleteKeyPackage;
@@ -38,7 +47,10 @@ export interface CreateGroupParams {
    * to the ids present in {@link components}.
    */
   requiredComponentIds?: AppComponentId[];
-  /** Additional group context extensions (optional) */
+  /**
+   * Additional group context extensions (optional), with unique extension types.
+   * Do not supply `app_data_dictionary`; dictionary data belongs in {@link components}.
+   */
   extensions?: GroupContextExtension[];
   /** Cipher suite implementation for cryptographic operations */
   ciphersuiteImpl: CiphersuiteImpl;
@@ -59,6 +71,21 @@ export async function createGroup(
     extensions = [],
     ciphersuiteImpl,
   } = params;
+
+  const extensionTypes = new Set<number>();
+  for (const extension of extensions) {
+    if (extension.extensionType === appDataDictionaryExtensionType) {
+      throw new InvalidGroupContextExtensionError(
+        "app_data_dictionary must not be supplied in extensions; put dictionary data in components",
+      );
+    }
+    if (extensionTypes.has(extension.extensionType)) {
+      throw new InvalidGroupContextExtensionError(
+        `Duplicate group context extension type: ${extension.extensionType}`,
+      );
+    }
+    extensionTypes.add(extension.extensionType);
+  }
 
   // The MLS group_id MUST be private and distinct from the public
   // nostr_group_id carried by the transport.nostr.routing component.
@@ -89,10 +116,12 @@ export async function createGroup(
     (e) =>
       e.extensionType === marmotRequiredCapabilitiesExtension().extensionType,
   );
+  // Keep the dictionary last, matching MDK: app_data_update replaces it in
+  // place in ts-mls, while OpenMLS removes it and appends it to the end.
   const groupExtensions = [
-    appDataExtension,
     ...(hasRequiredCapabilities ? [] : [marmotRequiredCapabilitiesExtension()]),
     ...extensions,
+    appDataExtension,
   ];
 
   const clientState = await MLSCreateGroup({
