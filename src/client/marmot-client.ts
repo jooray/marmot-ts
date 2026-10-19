@@ -234,6 +234,7 @@ export class MarmotClient<
       network: options.network,
       clientId: options.clientId,
       cryptoProvider: this.cryptoProvider,
+      capabilities: options.capabilities,
       getSignatureKeyPair: options.getSignatureKeyPair,
       verifyEvent,
       hasAdoptedGroup: async (groupId) =>

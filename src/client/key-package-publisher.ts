@@ -3,6 +3,7 @@ import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 import { EventSigner } from "applesauce-core";
 import { NostrEvent } from "applesauce-core/helpers/event";
 import {
+  Capabilities,
   CiphersuiteImpl,
   CiphersuiteName,
   ciphersuites,
@@ -32,6 +33,8 @@ export type KeyPackagePublisherOptions = {
   network: NostrNetworkInterface;
   /** The crypto provider to use for cryptographic operations */
   cryptoProvider?: CryptoProvider;
+  /** Capabilities to advertise in generated key packages; Marmot's required ones are always added. */
+  capabilities?: Capabilities;
   /** Load a persisted signing identity for the selected ciphersuite. */
   getSignatureKeyPair?: (
     ciphersuite: CiphersuiteImpl,
@@ -77,6 +80,7 @@ export class KeyPackagePublisher {
   readonly #signer: EventSigner;
   readonly #network: NostrNetworkInterface;
   readonly #cryptoProvider: CryptoProvider;
+  readonly #capabilities: Capabilities | undefined;
   readonly #getSignatureKeyPair: KeyPackagePublisherOptions["getSignatureKeyPair"];
   #log = logger.extend("KeyPackagePublisher");
 
@@ -85,6 +89,7 @@ export class KeyPackagePublisher {
     this.#signer = options.signer;
     this.#network = options.network;
     this.#cryptoProvider = options.cryptoProvider ?? defaultCryptoProvider;
+    this.#capabilities = options.capabilities;
   }
 
   /** Generates a fresh random addressable slot identifier (`d` tag value). */
@@ -109,6 +114,7 @@ export class KeyPackagePublisher {
       credential,
       ciphersuiteImpl,
       signatureKeyPair: await this.#getSignatureKeyPair?.(ciphersuiteImpl),
+      capabilities: this.#capabilities,
       isLastResort: options?.isLastResort,
       signer: this.#signer,
     });

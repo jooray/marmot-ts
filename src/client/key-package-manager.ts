@@ -151,6 +151,8 @@ export type KeyPackageManagerOptions = {
   network: NostrNetworkInterface;
   /** The crypto provider to use for cryptographic operations */
   cryptoProvider?: CryptoProvider;
+  /** Capabilities to advertise in generated key packages. */
+  capabilities?: KeyPackagePublisherOptions["capabilities"];
   /** Load a persisted installation signing identity. */
   getSignatureKeyPair?: KeyPackagePublisherOptions["getSignatureKeyPair"];
   /**
@@ -200,6 +202,7 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
       signer: options.signer,
       network: options.network,
       cryptoProvider: options.cryptoProvider,
+      capabilities: options.capabilities,
       getSignatureKeyPair: options.getSignatureKeyPair,
     });
     this.#verifyEvent = options.verifyEvent ?? defaultVerifyEvent;
