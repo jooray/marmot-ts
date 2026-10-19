@@ -2990,13 +2990,7 @@ export class MarmotGroupEngine<TEnvelope> {
       )
         return { kind: "skipped", envelope, message, reason: "past-epoch" };
       if (
-        !isAuthenticApplicationMessage(
-          result,
-          state,
-          log,
-          "sweep",
-          sourceEpoch,
-        )
+        !isAuthenticApplicationMessage(result, state, log, "sweep", sourceEpoch)
       )
         return {
           kind: "skipped",

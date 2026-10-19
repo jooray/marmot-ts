@@ -17,7 +17,7 @@ import { createCredential } from "../../../core/credential.js";
 import { createSimpleGroup } from "../../../core/group.js";
 import { serializeApplicationRumor } from "../../../core/group-message.js";
 import { generateKeyPackage } from "../../../core/key-package.js";
-import { InMemoryKeyValueStore } from "../../../extra";
+import { InMemoryKeyValueStore } from "../../../extra/index.js";
 import { GroupSession } from "../group-session.js";
 
 // Receiver-side MLS secret retention. Both rows were seen live against an MDK

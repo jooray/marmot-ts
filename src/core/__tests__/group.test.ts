@@ -6,6 +6,7 @@ import {
   defaultExtensionTypes,
   type ExtensionRequiredCapabilities,
   getCiphersuiteImpl,
+  makeCustomExtension,
 } from "ts-mls";
 
 import { createCredential } from "../credential.js";
@@ -171,10 +172,10 @@ describe("group construction", () => {
         ciphersuiteImpl: impl,
         signer: account.signer,
       });
-      const extra = {
+      const extra = makeCustomExtension({
         extensionType: 0xff01,
         extensionData: Uint8Array.of(1, 2, 3),
-      };
+      });
       const required = marmotRequiredCapabilitiesExtension();
       const { clientState } = await createGroup({
         creatorKeyPackage: kp,
@@ -217,8 +218,14 @@ describe("group construction", () => {
     {
       name: "duplicate custom extension types with different data",
       extensions: [
-        { extensionType: 0xff01, extensionData: Uint8Array.of(1) },
-        { extensionType: 0xff01, extensionData: Uint8Array.of(2) },
+        makeCustomExtension({
+          extensionType: 0xff01,
+          extensionData: Uint8Array.of(1),
+        }),
+        makeCustomExtension({
+          extensionType: 0xff01,
+          extensionData: Uint8Array.of(2),
+        }),
       ],
       error: "Duplicate group context extension type: 65281",
     },

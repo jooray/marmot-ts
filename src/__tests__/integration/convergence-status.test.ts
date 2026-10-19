@@ -423,18 +423,18 @@ async function twoMemberGroup() {
     state: adminEpoch2,
     ciphersuite: impl,
   });
-  return { impl, dPubkey, dEpoch1, commitEvent, appEvent };
+  return { impl, dSigner: dAccount.signer, dEpoch1, commitEvent, appEvent };
 }
 
 describe("settle-check liveness (#109)", () => {
   it("re-arms when the settle timer fires before the engine clock reaches the cutoff", async () => {
-    const { impl, dPubkey, dEpoch1, commitEvent } = await twoMemberGroup();
+    const { impl, dSigner, dEpoch1, commitEvent } = await twoMemberGroup();
     const clock = fakeClock(100_000);
     const timer = recordingScheduler();
     const published: NostrEvent[] = [];
     const dGroup = marmotGroup(
       dEpoch1,
-      dPubkey,
+      dSigner,
       impl,
       published,
       clock.now,
@@ -477,14 +477,14 @@ describe("settle-check liveness (#109)", () => {
   });
 
   it("drains queued outbound after resuming retained non-commit input", async () => {
-    const { impl, dPubkey, dEpoch1, commitEvent, appEvent } =
+    const { impl, dSigner, dEpoch1, commitEvent, appEvent } =
       await twoMemberGroup();
     const clock = fakeClock(100_000);
     const timer = recordingScheduler();
     const published: NostrEvent[] = [];
     const dGroup = marmotGroup(
       dEpoch1,
-      dPubkey,
+      dSigner,
       impl,
       published,
       clock.now,
