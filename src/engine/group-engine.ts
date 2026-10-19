@@ -1534,6 +1534,19 @@ export class MarmotGroupEngine<TEnvelope> {
         );
         if (proposalViolation) throw new CommitLegalityError(proposalViolation);
 
+        const imageOutcome = validateGroupImageLegality({
+          parentState: this.state,
+          proposals: [intent.proposal],
+          committerLeafIndex: Number(this.state.privatePath.leafIndex),
+        });
+        if (imageOutcome.kind === "violation")
+          throw new CommitLegalityError(imageOutcome.violation);
+        if (imageOutcome.kind === "undecidable")
+          throw new CommitLegalityError({
+            reason: "component-integrity",
+            detail: imageOutcome.detail,
+          });
+
         // Every peer (marmot-ts and MDK alike) refuses a standalone proposal
         // its sender may not make, so refuse it before publishing. In v1 a
         // non-admin may only send SelfRemove, and an admin may not send
@@ -1551,18 +1564,6 @@ export class MarmotGroupEngine<TEnvelope> {
         );
         if (senderViolation)
           throw new ProposalAuthorizationError(senderViolation);
-        const imageOutcome = validateGroupImageLegality({
-          parentState: this.state,
-          proposals: [intent.proposal],
-          committerLeafIndex: Number(this.state.privatePath.leafIndex),
-        });
-        if (imageOutcome.kind === "violation")
-          throw new CommitLegalityError(imageOutcome.violation);
-        if (imageOutcome.kind === "undecidable")
-          throw new CommitLegalityError({
-            reason: "component-integrity",
-            detail: imageOutcome.detail,
-          });
 
         const { message, newState } = await createProposal({
           context: {

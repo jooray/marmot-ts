@@ -1,15 +1,15 @@
 import {
+  appDataUpdateProposalType,
   createApplicationMessage,
   defaultCryptoProvider,
-  defaultProposalTypes,
-  pskTypes,
-  resumptionPSKUsages,
   getCiphersuiteImpl,
   unsafeTestingAuthenticationService,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
 
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
+import { encodeAdminPolicyV1 } from "../../core/components/admin-policy.js";
+import { GROUP_ADMIN_POLICY_COMPONENT_ID } from "../../core/components/ids.js";
 import { createCredential } from "../../core/credential.js";
 import { createSimpleGroup } from "../../core/group.js";
 import { generateKeyPackage } from "../../core/key-package.js";
@@ -109,15 +109,11 @@ describe("source-epoch retention of inner identities", () => {
     const proposal = await engine.send({
       kind: "proposal",
       proposal: {
-        proposalType: defaultProposalTypes.psk,
-        psk: {
-          preSharedKeyId: {
-            psktype: pskTypes.resumption,
-            usage: resumptionPSKUsages.application,
-            pskGroupId: engine.state.groupContext.groupId,
-            pskEpoch: 0n,
-            pskNonce: new Uint8Array(32).fill(1),
-          },
+        proposalType: appDataUpdateProposalType,
+        appDataUpdate: {
+          componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
+          operation: "update",
+          update: encodeAdminPolicyV1([testAccount(6).pubkey]),
         },
       },
     });

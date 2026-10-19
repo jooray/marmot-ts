@@ -835,29 +835,32 @@ describe("settled engine retention", () => {
     ).toEqual([3, 2]);
   });
 
-  it("keeps an exact resumption receiver through real proposal completion", async () => {
+  it("refuses a resumption PSK proposal without pinning its receiver", async () => {
     const { engine } = await fixture();
     await advance(engine);
     await advance(engine);
     await advance(engine);
     expect(engine.state.historicalReceiverData.has(0n)).toBe(true);
-    const proposal = await engine.send({
-      kind: "proposal",
-      proposal: {
-        proposalType: defaultProposalTypes.psk,
-        psk: {
-          preSharedKeyId: {
-            psktype: pskTypes.resumption,
-            usage: resumptionPSKUsages.application,
-            pskGroupId: engine.state.groupContext.groupId,
-            pskEpoch: 0n,
-            pskNonce: new Uint8Array(32).fill(7),
+    // MDK and every marmot-ts peer reject PreSharedKey proposals, so one can
+    // never be staged and its resumption receiver is never pinned.
+    await expect(
+      engine.send({
+        kind: "proposal",
+        proposal: {
+          proposalType: defaultProposalTypes.psk,
+          psk: {
+            preSharedKeyId: {
+              psktype: pskTypes.resumption,
+              usage: resumptionPSKUsages.application,
+              pskGroupId: engine.state.groupContext.groupId,
+              pskEpoch: 0n,
+              pskNonce: new Uint8Array(32).fill(7),
+            },
           },
         },
-      },
-    });
-    if (!("pending" in proposal)) throw new Error("expected proposal");
-    engine.confirmPublished(proposal.pending);
+      }),
+    ).rejects.toThrow("proposal type 4 is not supported");
+    expect(Object.keys(engine.state.unappliedProposals)).toHaveLength(0);
     let pins: unknown;
     await engine.retainSettled(async (capture, publish) => {
       pins = capture.pins;
@@ -865,20 +868,9 @@ describe("settled engine retention", () => {
       await publish(plan);
       return plan;
     });
-    expect(pins).toContainEqual({
-      stateTag: bytesToHex(engine.state.confirmationTag),
-      reason: "resumption",
-      receiverEpoch: 0,
-    });
-    expect(engine.state.historicalReceiverData.has(0n)).toBe(true);
-    const commit = await engine.send({
-      kind: "commit",
-      actorPubkey: testAccount(6).pubkey,
-    });
-    if (!("pending" in commit)) throw new Error("expected commit");
-    engine.confirmPublished(commit.pending);
-    expect(Object.keys(engine.state.unappliedProposals)).toHaveLength(0);
-    await engine.retainSettled();
+    expect(pins).not.toContainEqual(
+      expect.objectContaining({ reason: "resumption" }),
+    );
     expect(engine.state.historicalReceiverData.has(0n)).toBe(false);
   });
 
