@@ -284,6 +284,9 @@ describe("connection admission", () => {
         event,
       } = await setup(true);
       let fire!: () => void;
+      // The settle timer re-arms when it fires before the engine clock reaches
+      // the cutoff, so the test owns the clock and passes the window first.
+      let clockMs = Date.now();
       const timedGroup = new MarmotGroup(
         deserializeClientState(serializeClientState(group.state)),
         {
@@ -291,6 +294,7 @@ describe("connection admission", () => {
           signer: manager.signer,
           network,
           ciphersuite: group.ciphersuite,
+          now: () => clockMs,
           scheduler: {
             setTimer: (_ms, callback) => {
               fire = callback;
@@ -345,6 +349,7 @@ describe("connection admission", () => {
       expect(fire).toBeTypeOf("function");
       const timerResult = deferred();
       timedGroup.once("ingestResult", () => timerResult.resolve());
+      clockMs += 60_000;
       fire();
       await timerResult.promise;
       expect(results).toEqual([invalidation, invalidation]);
