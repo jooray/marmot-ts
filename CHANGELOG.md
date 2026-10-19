@@ -10,10 +10,16 @@
 - An admin removed by another admin now accepts its removal and sees the group as left. Previously its client rejected the removal commit as an `admin-leaf-coupling` violation and kept presenting the group as active.
 - Every commit's complete resulting state is checked against the current Marmot profile, as MDK does: every member leaf must advertise the group's required MLS capabilities and app components, the group must keep requiring the app-data dictionary, admin policy and account proof, every required component must be known and have state, and the frozen encrypted-media v1 component (`0x8008`) is not allowed. Previously marmot-ts applied commits White Noise rejects, such as adding a KeyPackage without a required component, and the group split. marmot-ts now also refuses to create such commits, including encrypted-media v1 updates.
 - Competing commits in the same epoch are ranked the way MDK and the spec rank them: an admin's commit (rename, invite, removal, admin change) beats a self-update or SelfRemove-only commit before the committer and digest tie-breakers. Previously marmot-ts could keep a different branch than White Noise members, splitting the group, and the history re-scoring pass could undo the branch fork recovery had just chosen. Removal recovery ranks the removing commit the same way.
+- Every proposal is authorized against its own sender, as MDK does: in v1 a non-admin may only send SelfRemove, and an admin may not send SelfRemove until it has left the admin set; PreSharedKey, ReInit, ExternalInit and unknown custom proposals are refused. Previously marmot-ts staged any member's standalone rename, removal or other admin-only proposal, and an admin's next commit carried it by reference; White Noise members rejected that commit and the group split. Local `send({ kind: "proposal" })` now throws `ProposalAuthorizationError` instead of publishing a proposal every peer refuses.
+- A staged proposal from the group's first member no longer loses its sender when group state is saved or copied (fixed in the bundled MLS fork).
 
 ### Changed
 
 - `serializeApplicationRumor` writes only the six Marmot app-event members (a `sig` or other extra field is no longer sent) and throws instead of producing a payload that receivers would drop.
+
+### Breaking changes
+
+- `groups.leave()` by an active admin now throws before publishing or deleting anything. Previously it published a SelfRemove that every peer rejected and then destroyed the local group, leaving the admin in the group for everyone else. To leave, first remove yourself from the admin set (another admin must remain), then call `leave()`.
 
 ## 0.7.0
 
