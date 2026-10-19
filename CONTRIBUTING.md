@@ -84,7 +84,12 @@ migration guidance for breaking changes. Internal-only maintenance does not need
 5. Tag the merged commit as `v<version>` (for example, `v0.6.0`) and push the tag.
    The release workflow verifies the version and changelog, publishes the library to
    npm with provenance, creates a GitHub release from those notes, and announces it
-   on Nostr.
+   on Nostr. Each step is skipped when its result already exists (the version is on
+   npm, or the GitHub release exists), so re-pushing a tag or re-running the workflow
+   does not republish or duplicate a release.
+6. Mark the release on Nostr with `ngit release publish <version> --tag v<version>`.
+   The manifest at `.ngit/release.yaml` holds the application identity and reads the
+   notes for the version from `CHANGELOG.md`.
 
 `pnpm release` publishes the root library package locally; it does not publish
 workspace packages. `pnpm release-next` continues to publish temporary prereleases
