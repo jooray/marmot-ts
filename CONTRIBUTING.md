@@ -77,7 +77,7 @@ migration guidance for breaking changes. Internal-only maintenance does not need
 ## Releases
 
 Configure the npm package's GitHub trusted publisher for `marmot-protocol/marmot-ts`,
-workflow `release.yml`, with direct publishing allowed and no environment name.
+workflow `release.yml`, with direct publishing allowed and environment `npm`.
 The release workflow authenticates through OIDC; no npm token secret is needed.
 
 1. Move the Unreleased entries into a section named for the release version and leave
