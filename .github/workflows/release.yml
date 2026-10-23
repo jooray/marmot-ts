@@ -9,7 +9,7 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
   contents: write # For creating releases
-  id-token: write # For npm provenance
+  id-token: write # For npm trusted publishing and provenance
 
 jobs:
   release:
@@ -49,11 +49,8 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Configure NPM
-        run: |
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Setup npm trusted publishing
+        run: npm install --global npm@11
 
       - name: Validate release tag and changelog
         env:
@@ -76,13 +73,14 @@ jobs:
 
       - name: Publish to npm
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if npm view "@internet-privacy/marmot-ts@${RELEASE_TAG#v}" version >/dev/null 2>&1; then
             echo "Version ${RELEASE_TAG#v} is already on npm; skipping publish"
           else
-            pnpm release
+            pnpm build
+            node scripts/verify-package-tarball.mjs --check-fork-unpublished
+            npm publish --access public --provenance
           fi
 
       - name: Create GitHub release

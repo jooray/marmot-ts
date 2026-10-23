@@ -76,6 +76,10 @@ migration guidance for breaking changes. Internal-only maintenance does not need
 
 ## Releases
 
+Configure the npm package's GitHub trusted publisher for `marmot-protocol/marmot-ts`,
+workflow `release.yml`, with direct publishing allowed and no environment name.
+The release workflow authenticates through OIDC; no npm token secret is needed.
+
 1. Move the Unreleased entries into a section named for the release version and leave
    an empty `## Unreleased` section for future changes.
 2. Update the root `package.json` version and run `pnpm install --lockfile-only`.
