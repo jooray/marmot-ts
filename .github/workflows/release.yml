@@ -51,7 +51,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Setup npm trusted publishing
-        run: npm install --global npm@11
+        run: npm install --global npm@^11.15.0
 
       - name: Validate release tag and changelog
         env:
@@ -72,16 +72,16 @@ jobs:
           fs.writeFileSync("release-notes.md", notes + "\n");
           NODE
 
-      - name: Publish to npm
+      - name: Stage npm publish
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if npm view "@internet-privacy/marmot-ts@${RELEASE_TAG#v}" version >/dev/null 2>&1; then
-            echo "Version ${RELEASE_TAG#v} is already on npm; skipping publish"
+            echo "Version ${RELEASE_TAG#v} is already on npm; skipping staging"
           else
             pnpm build
             node scripts/verify-package-tarball.mjs --check-fork-unpublished
-            npm publish --access public --provenance
+            npm stage publish --access public --provenance
           fi
 
       - name: Create GitHub release

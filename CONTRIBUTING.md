@@ -77,8 +77,9 @@ migration guidance for breaking changes. Internal-only maintenance does not need
 ## Releases
 
 Configure the npm package's GitHub trusted publisher for `marmot-protocol/marmot-ts`,
-workflow `release.yml`, with direct publishing allowed and environment `npm`.
-The release workflow authenticates through OIDC; no npm token secret is needed.
+workflow `release.yml`, and environment `npm`. Direct publishing is not needed: the
+release workflow authenticates through OIDC and stages the publish with
+`npm stage publish`, so no npm token secret is needed.
 
 1. Move the Unreleased entries into a section named for the release version and leave
    an empty `## Unreleased` section for future changes.
@@ -86,12 +87,15 @@ The release workflow authenticates through OIDC; no npm token secret is needed.
 3. Run `pnpm check` and ensure CI passes.
 4. Commit the release metadata through a PR and merge it into `master`.
 5. Tag the merged commit as `v<version>` (for example, `v0.6.0`) and push the tag.
-   The release workflow verifies the version and changelog, publishes the library to
+   The release workflow verifies the version and changelog, stages the library on
    npm with provenance, and creates a GitHub release from those notes. Each step is
    skipped when its result already exists (the version is on npm, or the GitHub
    release exists), so re-pushing a tag or re-running the workflow does not
    republish or duplicate a release.
-6. Mark the release on Nostr with `ngit release publish <version> --tag v<version>`.
+6. Approve the staged package on npmjs.com (package → Staged Packages → Approve) or
+   with `npm stage approve <stage-id>`; either asks for 2FA. The version is not live
+   on npm until it is approved.
+7. Mark the release on Nostr with `ngit release publish <version> --tag v<version>`.
    The manifest at `.ngit/release.yaml` holds the application identity, reads the
    notes for the version from `CHANGELOG.md`, and links the version's npm tarball
    as a platform-agnostic URL asset (nothing is uploaded to Blossom).
