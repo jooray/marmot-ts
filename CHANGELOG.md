@@ -6,40 +6,29 @@
 
 ### Added
 
-- Encrypted media v2 policy, attachment metadata and encryption, source-bound sending/decryption, and bounded Blossom upload/download with ordered fallbacks. Failed attachments preserve captions and valid siblings. New KeyPackages advertise v2; `ensurePublished()` upgrades old publications while preserving pending-Welcome private bundles.
-
-- Reuse one persisted leaf signature key per installation across KeyPackages with the new `getSignatureKeyPair` option on `MarmotClient` (or `signatureKeyPair` on `generateKeyPackage`). Other clients can then match a member's leaf to its published KeyPackages after the one used to join was consumed, as they can for MDK devices. Init and encryption keys stay fresh for every KeyPackage.
+- Encrypted media v2 with source-bound encryption, Blossom transfers, and delayed attachment decryption after restart.
+- Reuse an installation's leaf signing key across KeyPackages with `getSignatureKeyPair` or `generateKeyPackage`'s `signatureKeyPair` option.
 
 ### Changed
 
-- Upgrade Applesauce dependencies to v7 for improved event caching, relay reliability, and loader performance. Applications using Applesauce alongside marmot-ts should upgrade their Applesauce packages to v7 together. Live rumor-history subscriptions now compile filters once for faster matching. The OpenTUI example uses operation-scoped relay authentication.
-
-- `GroupsManager.connect()` and `connectAll()` fetch a group's kind 445 backlog in pages and, after a relay's first complete backfill, only from that relay's cursor (minus a slack window); the live subscription starts a slack window before the backfill. Cursors are stored in `ingestStateStore`, so pass a durable one to keep reconnects cheap across restarts. A relay that fails or stays incomplete re-reads its own window on the next connect without holding back the others, and a backfill that hits the page cap resumes below the range already read. A cursor does not advance past events the group still holds only in memory (unless they are dated more than seven days before the newest event), or when a relay answers outside the requested window or may have truncated a one-second page. Tune with the new `backfillSlackSeconds`, `backfillPageSize`, and `backfillMaxPages` connect options. The network adapter's `request` must reject when a relay fails or times out.
-- `serializeApplicationRumor` writes only the six Marmot app-event members (a `sig` or other extra field is no longer sent) and throws instead of producing a payload that receivers would drop.
+- Upgrade Applesauce to v7. Applications should upgrade their Applesauce packages together.
+- Group connections use paginated backfill and persisted relay cursors. Use a durable `ingestStateStore`; network adapters must reject failed or timed-out requests. See [Network](docs/client/network.md).
+- `serializeApplicationRumor` omits extra fields and rejects invalid payloads.
 
 ### Fixed
 
-- The OpenTUI example finishes admin changes after the first relay accepts the commit while continuing publication to the other relays. Lost acknowledgments retain the original commit for safe retry instead of stranding the sender behind its peers; `retryPendingPublication()` resumes it without regenerating MLS bytes. Configure a durable `rewindStore` to preserve pending commits across restart.
-
-- KeyPackage publication tags now reflect the supplied signed LeafNode, avoiding overstated capabilities when older KeyPackages are republished. Delayed media messages retain their source epoch in durable delivery evidence, so their attachments can resolve after restart.
-- Accept valid MDK Welcomes whose groups do not require `self_remove`, a group profile, or lifecycle-v1. Joining now checks the protocol baseline separately from new-group defaults and applies the same complete-state invariants as commits. Existing groups without lifecycle-v1 remain usable without disbanding. Welcomes containing frozen encrypted-media v1 state are now refused, matching MDK; recreate those groups without that component.
-
-- Groups created before 0.7.0, with the app-data dictionary first in their GroupContext extensions, can now be renamed and have their admins, relays or other components changed without splitting off White Noise members. The first such commit by a marmot-ts admin also moves the dictionary last, so later updates need no repair. Groups that already split on an earlier update are not recovered.
-- Refuse to invite (or found a group with) a KeyPackage whose leaf does not advertise every app component the group requires, or a required agent-text-stream role. MDK members reject such an Add commit, so the group forked: marmot-ts members moved to the next epoch and White Noise members did not. `evaluateKeyPackageForGroup()` now reports missing app components too, and the check is exported as `missingGroupRequirements()`.
-- Application messages are decoded as strictly as MDK: payloads with a duplicate member, an uppercase `id` or `pubkey`, a `created_at` or `kind` that is not a plain non-negative integer (`1.5`, `1.0`, `1e9`, `-1`), an unpaired surrogate, invalid UTF-8 or a leading BOM are now rejected. White Noise already dropped these, so a member could show marmot-ts users messages White Noise users never saw.
-- An admin removed by another admin now accepts its removal and sees the group as left. Previously its client rejected the removal commit as an `admin-leaf-coupling` violation and kept presenting the group as active.
-- Every commit's complete resulting state is checked against the current Marmot profile, as MDK does: every member leaf must advertise the group's required MLS capabilities and app components, the group must keep requiring the app-data dictionary, admin policy and account proof, every required component must be known and have state, and the frozen encrypted-media v1 component (`0x8008`) is not allowed. Previously marmot-ts applied commits White Noise rejects, such as adding a KeyPackage without a required component, and the group split. marmot-ts now also refuses to create such commits, including encrypted-media v1 updates.
-- Competing commits in the same epoch are ranked the way MDK and the spec rank them: an admin's commit (rename, invite, removal, admin change) beats a self-update or SelfRemove-only commit before the committer and digest tie-breakers. Previously marmot-ts could keep a different branch than White Noise members, splitting the group, and the history re-scoring pass could undo the branch fork recovery had just chosen. Removal recovery ranks the removing commit the same way.
-- Every proposal is authorized against its own sender, as MDK does: in v1 a non-admin may only send SelfRemove, and an admin may not send SelfRemove until it has left the admin set; PreSharedKey, ReInit, ExternalInit and unknown custom proposals are refused. Previously marmot-ts staged any member's standalone rename, removal or other admin-only proposal, and an admin's next commit carried it by reference; White Noise members rejected that commit and the group split. Local `send({ kind: "proposal" })` now throws `ProposalAuthorizationError` instead of publishing a proposal every peer refuses.
-- A staged proposal from the group's first member no longer loses its sender when group state is saved or copied (fixed in the bundled MLS fork).
-- KeyPackages generated by `MarmotClient` now use the client's `cryptoProvider` instead of the default provider.
-- KeyPackages generated by `MarmotClient` now advertise the client's `capabilities` option, which was previously ignored. Marmot's required capabilities are always included.
+- Retry commits with uncertain publication through `retryPendingPublication()`. A durable `rewindStore` preserves pending commits across restart.
+- KeyPackage publication tags reflect signed capabilities; `ensurePublished()` refreshes packages missing media v2 support without losing pending-Welcome keys.
+- Accept valid MDK Welcomes without optional group profile, lifecycle, or self-remove requirements.
+- Update pre-0.7 groups without splitting White Noise peers. Existing splits still require recovery.
+- Align member capabilities, proposal authorization, message validation, and fork selection with MDK to prevent group splits. Invalid local proposals throw `ProposalAuthorizationError`.
+- Correctly accept an admin's removal and preserve staged proposal senders across state copies.
+- Honor `MarmotClient`'s `cryptoProvider` and `capabilities` options when generating KeyPackages.
 
 ### Breaking changes
 
-- Unversioned encrypted-media APIs now use v2 (`0x800b`) for MDK-compatible attachments. Use `prepareMediaMessage` and retain its guarded intent when uploading and sending; a changed MLS source throws `StaleMediaPreparationError` and requires fresh preparation. Explicit `V1` helpers preserve historical data. Existing v1 policy users should switch to `EncryptedMediaPolicyV2`; unsupported legacy groups still require recreation. See the [encrypted-media migration guide](docs/core/media.md).
-
-- `groups.leave()` by an active admin now throws before publishing or deleting anything. Previously it published a SelfRemove that every peer rejected and then destroyed the local group, leaving the admin in the group for everyone else. To leave, first remove yourself from the admin set (another admin must remain), then call `leave()`.
+- Unversioned media APIs now use v2 (`0x800b`). Switch to `EncryptedMediaPolicyV2` and `prepareMediaMessage`; prepare again after `StaleMediaPreparationError`. Explicit `V1` helpers read historical data; legacy v1 groups require recreation. See [Media migration](docs/core/media.md).
+- Active admins must leave the admin set before calling `groups.leave()`; another admin must remain.
 
 ## 0.7.0
 
