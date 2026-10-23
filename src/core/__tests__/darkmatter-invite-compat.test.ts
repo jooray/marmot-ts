@@ -24,30 +24,9 @@ import {
 } from "../components/ids.js";
 
 /**
- * Interop contract: a KeyPackage marmot-ts publishes (as the examples/opentui
- * app does) MUST satisfy every capability the darkmatter Rust engine requires
- * of an invitee when adding it to a default marmot-app (current-profile)
- * group, or `do_send_invite` rejects it with `MissingRequiredCapabilities` /
- * `InvalidAccountIdentityProof`.
- *
- * The required set below mirrors the Rust side (current profile,
- * `refs/mdk/crates/cgka-engine/src/app_components.rs`):
- * - `CURRENT_PROFILE_REQUIRED_GROUP_CONTEXT_EXTENSIONS` = `[0x0006]` (no
- *   `0xf2f1` requirement) plus the agent-text-stream-QUIC `receive` role
- *   capability (`0xf2d1`, `crates/traits/src/agent_text_stream.rs`
- *   `user_to_agent_default()`, folded in at
- *   `crates/cgka-engine/src/message_processor/send.rs:89-107`).
- * - `CURRENT_PROFILE_REQUIRED_PROPOSALS` = `[0x0008]` plus `self_remove`
- *   (`0x000a`, the Required `self-remove` feature,
- *   `crates/cgka-engine/src/capabilities.rs`).
- * - `CURRENT_PROFILE_REQUIRED_APP_COMPONENTS` = `{0x8003, 0x8009}`, folded
- *   into `default_group_components()` → `{0x8001, 0x8003, 0x8004, 0x8006,
- *   0x8008, 0x8009}` (`crates/marmot-app/src/client/mod.rs:167-176`).
- *
- * If darkmatter fixes the over-requiring tracked in
- * marmot-protocol/darkmatter#481 (it forces 0x8006 onto every group), the
- * 0xf2d1 row here becomes optional for plain chat groups — but advertising it
- * stays harmless and keeps compatibility with current releases.
+ * Capability regression checks mirrored in TypeScript; these do not execute MDK.
+ * Current media support is v2 (0x800b). Run scripts/mdk-interop/run.mjs for
+ * independent Rust KeyPackage, Welcome and media-message/crypto exchange.
  */
 const DARKMATTER_REQUIRED_LEAF_EXTENSIONS = [
   appDataDictionaryExtensionType, // 0x0006
@@ -64,7 +43,7 @@ const DARKMATTER_REQUIRED_APP_COMPONENTS = [
   GROUP_ADMIN_POLICY_COMPONENT_ID, // 0x8003
   NOSTR_ROUTING_COMPONENT_ID, // 0x8004
   AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, // 0x8006
-  GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, // 0x8008
+  GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, // 0x800b
   ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, // 0x8009
 ];
 
@@ -76,7 +55,7 @@ const DARKMATTER_REQUIRED_APP_COMPONENTS = [
 // "legacy profile -> unsupported legacy-group".
 const LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE = 0xf2f1;
 
-describe("darkmatter invite compatibility", () => {
+describe("Marmot capability advertisement (TypeScript regression)", () => {
   async function generateOpenTuiStyleKeyPackage() {
     // Mirror the examples/opentui flow: default ciphersuite/capabilities and a
     // real Nostr account signer, so the leaf carries the 0x8009 proof.
@@ -110,7 +89,7 @@ describe("darkmatter invite compatibility", () => {
     );
   });
 
-  it("advertises every app component darkmatter's default group requires", async () => {
+  it("advertises required current components (independent Rust compatibility is tested separately)", async () => {
     const { keyPackage } = await generateOpenTuiStyleKeyPackage();
     // The leaf carries the app_components advertisement inside its
     // app_data_dictionary extension; darkmatter reads it the same way.
