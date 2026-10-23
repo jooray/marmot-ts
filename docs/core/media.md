@@ -54,6 +54,12 @@ It defaults to HTTPS and rejects private literal hosts. A custom
 allowlist. Endpoint validity is independent of permission to contact it.
 The HTTP implementation and deployment network govern DNS resolution.
 
+Uploads verify the ciphertext hash before signing and check any hash returned
+in the server descriptor or encoded in its locator path. A missing descriptor
+URL uses the endpoint's `/<ciphertext_sha256>` fallback. Explicit descriptor
+URLs are preserved exactly and need not contain a hash; downloaded bytes are
+always verified. Destination checks run before signing and again before HTTP.
+
 ## Receive
 
 Fully drain each ingest generator before processing another batch. For an
@@ -85,6 +91,29 @@ for await (const result of group.ingest(events)) {
 tries explicit locators first, then current policy fallbacks, including after a
 corrupt response. Malformed references are omitted; failed fetches or decryption
 produce an unavailable attachment without losing the caption or valid siblings.
+
+To retain malformed attachments' positions for rendering, use
+`getMediaAttachmentOutcomes` from the core entrypoint:
+
+```ts
+import { getMediaAttachmentOutcomes } from "@internet-privacy/marmot-ts/core";
+
+for (const outcome of getMediaAttachmentOutcomes(rumor.tags)) {
+  if (outcome.kind === "rejected") {
+    // Keep an unavailable placeholder at this imeta index.
+    console.log(outcome.attachmentIndex, outcome.rejection.kind);
+  } else {
+    // outcome.attachment is a validated v2 reference.
+  }
+}
+```
+
+`attachmentIndex` counts only `imeta` tags. Rejection kinds match MDK:
+`invalid_structure`, `unsupported_format`, `missing_field`, `duplicate_field`,
+and `malformed_field`. `parseMediaAttachment(tag)` throws a
+`MediaAttachmentRejection` with that `kind`; `parseMediaImetaTag(tag)` keeps
+its existing `null` result for invalid references. These APIs parse current v2
+references; v1 history continues to use the explicit historical helpers.
 
 For stored history, `await group.session.mediaSourceForRumor(rumor.id)` resolves
 authenticated delivery evidence while it remains retained. Missing evidence

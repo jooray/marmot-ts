@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Inspect rejected media attachments with typed reasons and stable attachment positions using `parseMediaAttachment` and `getMediaAttachmentOutcomes`.
+
+### Fixed
+
+- Blossom uploads validate destinations and ciphertext before signing, reject mismatched server descriptors, and use the spec fallback URL when a descriptor omits its URL.
+
 ## 0.8.0
 
 ### Added

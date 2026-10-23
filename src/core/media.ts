@@ -24,6 +24,11 @@ export {
 
 // imeta tag (de)serialization and strict validation.
 export {
+  MediaAttachmentRejection,
+  type MediaAttachmentRejectionKind,
+  type MediaAttachmentOutcome,
+  parseMediaAttachment,
+  getMediaAttachmentOutcomes,
   encodeMediaImetaTag,
   parseMediaImetaTag,
   getMediaAttachments,
