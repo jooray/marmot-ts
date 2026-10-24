@@ -20,6 +20,7 @@ export default defineConfig({
         items: [
           { text: "Getting Started", link: "/getting-started" },
           { text: "Architecture", link: "/guide/architecture" },
+          { text: "MDK Compatibility", link: "/guide/mdk-compatibility" },
         ],
       },
       {
@@ -47,6 +48,7 @@ export default defineConfig({
           { text: "Key Packages", link: "/core/key-packages" },
           { text: "Groups", link: "/core/groups" },
           { text: "Messages", link: "/core/messages" },
+          { text: "Encrypted Media", link: "/core/media" },
           { text: "Members", link: "/core/members" },
           { text: "Welcome Messages", link: "/core/welcome" },
           { text: "Key Package Distribution", link: "/core/distribution" },

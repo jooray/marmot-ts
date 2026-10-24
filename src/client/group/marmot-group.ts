@@ -45,6 +45,8 @@ import {
   evaluateKeyPackageForGroup,
   type KeyPackageEligibility,
 } from "../../core/key-package-eligibility.js";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
+import { PendingPublicationStore } from "../runtime/pending-publication.js";
 import { GroupRuntime } from "../runtime/group-runtime.js";
 import { linkPublicationRetention } from "../runtime/publication-retention.js";
 import type {
@@ -189,7 +191,7 @@ export interface BaseGroupHistory extends GroupSessionHistory {
 export type StoredMedia = {
   /** Plaintext (decrypted) file bytes. */
   data: Uint8Array;
-  /** The full encrypted-media-v1 attachment metadata associated with this blob. */
+  /** The full encrypted-media-v2 attachment metadata associated with this blob. */
   attachment: MediaAttachment;
 };
 
@@ -937,11 +939,37 @@ export class MarmotGroup<
 
     this.idStr = bytesToHex(this.id);
     this.log = logger.extend(`group:${this.idStr.slice(0, 8)}`);
+    const publicationStore =
+      options.rewindStore ?? new InMemoryKeyValueStore<Uint8Array>();
     this.runtime = new GroupRuntime({
       welcomeDelivery: new NostrWelcomeDelivery({
         signer: this.signer,
         network: this.network,
       }),
+      pendingPublications: new PendingPublicationStore(
+        {
+          getItem: (key) => publicationStore.getItem(key),
+          setItem: async (key, value) => {
+            await this.session.persistPublication(() =>
+              publicationStore.setItem(key, value),
+            );
+            return value;
+          },
+          removeItem: (key) =>
+            this.session.persistPublication(() =>
+              publicationStore.removeItem(key),
+            ),
+          keys: () => publicationStore.keys(),
+          clear: () =>
+            this.session.persistPublication(() => publicationStore.clear()),
+        },
+        this.idStr,
+      ),
+      restorePending: (pending) =>
+        this.session.restorePendingPublication(pending),
+      isApplied: (pending) =>
+        bytesToHex(this.state.confirmationTag) ===
+        bytesToHex(pending.newState.confirmationTag),
       getNetwork: () => this.network,
       getRelays: () => this.relays,
       getGroupRef: () => this.idStr,
@@ -957,6 +985,7 @@ export class MarmotGroup<
     linkPublicationRetention(this.runtime, this.session);
     this.mediaService = new GroupMediaService({
       media: this.media,
+      assertOpen: () => this.session.assertOutboundOpen(),
       getState: () => this.state,
       getCiphersuite: () => this.ciphersuite,
       getRetainedStates: () => this.session.retainedStates(),
@@ -987,7 +1016,13 @@ export class MarmotGroup<
       ...options,
       ciphersuite: cipherSuite,
     });
-    return group;
+    try {
+      await group.runtime.hydratePublication();
+      return group;
+    } catch (error) {
+      group.dispose();
+      throw error;
+    }
   }
 
   /**
@@ -1185,6 +1220,7 @@ export class MarmotGroup<
     intent: GroupSessionSendIntent,
   ): Promise<GroupPublishResult[]> {
     this.#assertNotDisbanded();
+    await this.runtime.retryPendingPublication();
     await this.session.hydrateLifecycleEvidence();
     if (this.session.removalBlocked)
       throw new Error("Group removed or removal recovery pending");
@@ -1224,6 +1260,12 @@ export class MarmotGroup<
       signal?.addEventListener("abort", abort, { once: true });
       if (signal?.aborted) abort();
     });
+  }
+
+  /** Retry a retained commit after an uncertain relay result, without regenerating it. */
+  retryPendingPublication(): Promise<GroupPublishResult[]> {
+    this.#assertNotDisbanded();
+    return this.runtime.retryPendingPublication();
   }
 
   /** Atomically enables lifecycle-v1 for a legacy group and publishes it once. */
@@ -1500,6 +1542,7 @@ export class MarmotGroup<
     events: NostrEvent[],
     options?: { maxRetries?: number },
   ): AsyncGenerator<DispositionedIngestResult> {
+    await this.runtime.hydratePublication();
     // The fork-history tree can grow during ingest (new commits / forks) without
     // the canonical state changing — track its size to emit `historyChanged`.
     const historySizeBefore = this.session.historyTree.size;
@@ -1639,7 +1682,7 @@ export class MarmotGroup<
   }
 
   /**
-   * Encrypts a media file for sharing in a group message (encrypted-media-v1).
+   * Encrypts a media file for sharing in a group message (encrypted-media-v2).
    *
    * Derives the per-file key from the current MLS epoch, encrypts with
    * ChaCha20-Poly1305, and returns the ciphertext alongside a populated
@@ -1650,28 +1693,32 @@ export class MarmotGroup<
    * 1. Upload `encrypted` to a blob store (`ciphertextSha256` is the content id).
    * 2. Push a locator (`{ kind, value }`) onto `attachment.locators`.
    * 3. Serialize with `encodeMediaImetaTag` and include the tag on the rumor.
+   * 4. Preserve the returned `expectedParent` on the application send intent.
    */
   async encryptMedia(
     blob: Blob,
     metadata: EncryptMediaMetadata,
-  ): Promise<{ encrypted: Uint8Array; attachment: MediaAttachment }> {
+  ): Promise<{
+    encrypted: Uint8Array;
+    attachment: MediaAttachment;
+    expectedParent: string;
+  }> {
     return this.mediaService.encryptMedia(blob, metadata);
   }
 
   /**
-   * Decrypts an encrypted-media-v1 attachment downloaded from a blob store.
+   * Decrypts an encrypted-media-v2 attachment downloaded from a blob store.
    *
-   * On the first call for a given file the plaintext bytes are derived via
-   * key-derivation + ChaCha20-Poly1305 decryption (after verifying the
-   * ciphertext and plaintext hashes) and stored in {`@link` media}. Subsequent
-   * calls for the same `attachment.ciphertextSha256` are served directly from
-   * the cache, skipping key-derivation entirely.
+   * Pass the authenticated sourceParent from the processed message or
+   * session.mediaSourceForRumor(). Omission selects the current state only.
+   * Cached plaintext never bypasses ciphertext and metadata validation.
    */
   async decryptMedia(
     encrypted: Uint8Array,
     attachment: MediaAttachment,
+    sourceParent?: string,
   ): Promise<StoredMedia> {
-    return this.mediaService.decryptMedia(encrypted, attachment);
+    return this.mediaService.decryptMedia(encrypted, attachment, sourceParent);
   }
 
   /**

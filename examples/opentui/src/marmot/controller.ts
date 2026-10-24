@@ -20,9 +20,13 @@ import {
   type MarmotClient,
   type MarmotGroup,
   Proposals,
+  PublicationUncertainError,
   type UnreadInvite,
   type Unsubscribable,
   type WelcomeRecipient,
+  prepareMediaMessage,
+  downloadMediaAttachment,
+  createBlossomMediaTransport,
 } from "@internet-privacy/marmot-ts/client";
 import {
   ADDRESSABLE_KEY_PACKAGE_KIND,
@@ -32,12 +36,9 @@ import {
   getKeyPackageReference,
 } from "@internet-privacy/marmot-ts";
 import {
-  BLOSSOM_LOCATOR_KIND,
-  encodeMediaImetaTag,
   encryptedMediaBlossomDefault,
   getMediaAttachments,
-  resolveMediaFetchUrls,
-  type EncryptedMediaPolicyV1,
+  type EncryptedMediaPolicyV2,
   type MediaAttachment,
 } from "@internet-privacy/marmot-ts/core";
 import type { Proposal } from "@internet-privacy/marmot-ts/mls";
@@ -51,7 +52,6 @@ import createDebug from "debug";
 import { readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-import { downloadEncryptedBlob, uploadEncryptedBlob } from "./blossom.js";
 import { guessMediaType } from "./mime.js";
 import { LOOKUP_RELAYS, type Directory } from "../helpers/discovery.js";
 import type { RelayPool } from "../helpers/relay-pool.js";
@@ -169,6 +169,18 @@ function requiredCapabilitiesDetails(
   };
 }
 
+function latestPublished(pkg: ListedKeyPackage): NostrEvent | null {
+  return (pkg.published ?? []).reduce<NostrEvent | null>(
+    (newest, event) =>
+      !newest || event.created_at > newest.created_at ? event : newest,
+    null,
+  );
+}
+
+function publishedAt(pkg: ListedKeyPackage): number {
+  return latestPublished(pkg)?.created_at ?? 0;
+}
+
 function keyPackageDetails(pkg: ListedKeyPackage): KeyPackageDetails {
   const capabilities = pkg.publicPackage.leafNode.capabilities;
   const keyPackageExtensions = extensionDetails(pkg.publicPackage.extensions);
@@ -178,7 +190,6 @@ function keyPackageDetails(pkg: ListedKeyPackage): KeyPackageDetails {
 
   return {
     refHex: hex(pkg.keyPackageRef),
-    slot: pkg.identifier ?? null,
     used: pkg.used === true,
     publishedCount: pkg.published?.length ?? 0,
     cipherSuite: codePointHex(pkg.publicPackage.cipherSuite),
@@ -347,14 +358,31 @@ export interface StatusLine {
   at: number;
 }
 
+/**
+ * This client's single KeyPackage (the one in its `clientId` slot) plus the
+ * KeyPackages the account's other devices have published to its outbox relays.
+ */
 export interface KeyPackageSummary {
-  total: number;
-  unused: number;
-  slot: string | null;
-  newestPublishedAt: number | null;
-  /** Event id (hex) of the most recently published KeyPackage, if any. */
-  newestPublishedId: string | null;
+  /** This client's KeyPackage, or null before one has been published. */
   current: KeyPackageDetails | null;
+  /** When this client's KeyPackage was last published (seconds), if known. */
+  publishedAt: number | null;
+  /** Event id (hex) of this client's latest published KeyPackage, if any. */
+  publishedId: string | null;
+  /** The newest KeyPackage per other-device slot, newest first. */
+  otherDevices: DeviceKeyPackage[];
+  /** True while the other devices' KeyPackages are being fetched. */
+  otherDevicesLoading: boolean;
+}
+
+/** Another device's published KeyPackage (kind 30443) for this account. */
+export interface DeviceKeyPackage {
+  /** The device's addressable slot (`d` tag). */
+  slot: string;
+  eventId: string;
+  createdAt: number;
+  /** The KeyPackageRef (`i` tag) hex, if present. */
+  refHex: string | null;
 }
 
 export interface KeyPackageExtensionDetails {
@@ -370,7 +398,6 @@ export interface RequiredCapabilitiesDetails {
 
 export interface KeyPackageDetails {
   refHex: string;
-  slot: string | null;
   used: boolean;
   publishedCount: number;
   cipherSuite: string;
@@ -578,7 +605,7 @@ export class MarmotController {
    */
   readonly #mediaIndex = new Map<string, Map<string, MediaFetchRecord>>();
   /** Lazily-built fallback media policy (see {@link DEFAULT_BLOSSOM_SERVERS}). */
-  #defaultMediaPolicyCache?: EncryptedMediaPolicyV1;
+  #defaultMediaPolicyCache?: EncryptedMediaPolicyV2;
   /** Older-message pagination state, one per group id. */
   readonly #pagination = new Map<string, PaginationState>();
 
@@ -587,12 +614,11 @@ export class MarmotController {
   #status: StatusLine[] = [];
   #activeId: string | null = null;
   #keyPackages: KeyPackageSummary = {
-    total: 0,
-    unused: 0,
-    slot: null,
-    newestPublishedAt: null,
-    newestPublishedId: null,
     current: null,
+    publishedAt: null,
+    publishedId: null,
+    otherDevices: [],
+    otherDevicesLoading: false,
   };
   /**
    * Advertised NIP-65 outbox list (kind 10002) — the user's own write relays,
@@ -790,6 +816,7 @@ export class MarmotController {
         );
       const group = await this.#client.groups.create(name, {
         relays: groupRelays,
+        encryptedMedia: this.#defaultMediaPolicy(),
       });
       this.#attachGroup(group);
       this.#activeId = group.idStr;
@@ -860,11 +887,9 @@ export class MarmotController {
       onProgress?.(
         `fetching KeyPackages from ${searchRelays.length} relay(s)…`,
       );
-      // KeyPackages are public, so this lookup does not wait on auth: a relay
-      // whose connection was flagged auth-required by another REQ (e.g.
-      // ditto gating our kind-1059 inbox) would otherwise hold this REQ
-      // until auth succeeds. applesauce's group completion keeps any one
-      // stuck relay from blocking results from the others.
+      // KeyPackages are public: decline authentication for this lookup.
+      // Other operations on the same connection can authenticate independently;
+      // an auth refusal here fails only this relay's request.
       const kps = await this.#pool.request(
         searchRelays,
         {
@@ -1100,9 +1125,26 @@ export class MarmotController {
         adminPubkeys: next,
       })(group.session.proposalContext());
       if (!proposal) return;
-      await this.#client.groups.commit(group.id, {
-        extraProposals: [proposal],
-      });
+      try {
+        await this.#client.groups.commit(group.id, {
+          extraProposals: [proposal],
+        });
+      } catch (error) {
+        if (!(error instanceof PublicationUncertainError)) throw error;
+        this.log(
+          "commit acknowledgement lost; retrying the original signed commit",
+        );
+        await group.retryPendingPublication();
+      }
+      if (group.lifecycle === "PendingPublish")
+        await group.retryPendingPublication();
+      if (
+        makeAdmin !== (group.groupData?.adminPubkeys.includes(pubkey) ?? false)
+      ) {
+        throw new Error(
+          "Admin commit has not been applied locally; retry pending publication before changing roles again",
+        );
+      }
       this.log(
         `${makeAdmin ? "promoted" : "demoted"} ${npubShort(pubkey)} ${makeAdmin ? "to" : "from"} admin`,
       );
@@ -1181,28 +1223,23 @@ export class MarmotController {
     const fileBytes = new Uint8Array(await readFile(path));
     const mediaType = guessMediaType(filename);
 
-    const { encrypted, attachment } = await group.encryptMedia(
-      new Blob([fileBytes], { type: mediaType }),
-      { filename, type: mediaType },
+    const tags: string[][] = replyTo
+      ? [["q", replyTo.id, "", replyTo.authorPubkey]]
+      : [];
+    const prepared = await prepareMediaMessage(
+      group,
+      [
+        {
+          blob: new Blob([fileBytes], { type: mediaType }),
+          metadata: { filename, type: mediaType },
+        },
+      ],
+      {
+        transport: createBlossomMediaTransport({ signer: group.signer }),
+        tags,
+      },
     );
-
-    const server = this.#uploadServer(group);
-    this.log(
-      `uploading ${filename} (${formatBytes(fileBytes.length)}) → ${server}`,
-    );
-    const url = await uploadEncryptedBlob(encrypted, server, group.signer);
-    attachment.locators.push({ kind: BLOSSOM_LOCATOR_KIND, value: url });
-
-    // Seed our own plaintext so the attachment shows as ready immediately; the
-    // incoming history projection then finds the blob already cached.
-    this.#seedMedia(group, attachment, fileBytes);
-
-    const tags: string[][] = [encodeMediaImetaTag(attachment)];
-    if (replyTo) tags.push(["q", replyTo.id, "", replyTo.authorPubkey]);
-    const pubkey = await group.signer.getPublicKey();
-    const rumor = createChatRumor({ pubkey, content: "", tags });
-    const intent = createApplicationMessageIntent(rumor);
-    await this.#client.groups.send(group.id, intent);
+    await this.#client.groups.send(group.id, prepared.intent);
     this.log(`sent ${filename}`);
   }
 
@@ -1310,37 +1347,78 @@ export class MarmotController {
     return state;
   }
 
-  async publishKeyPackage(): Promise<void> {
+  /**
+   * Replaces this client's KeyPackage with a fresh one in the same `clientId`
+   * slot (relays supersede the old event), or publishes the first one when
+   * this client has none yet. Other devices' KeyPackages are never touched.
+   */
+  async rotateKeyPackage(): Promise<void> {
     await this.#withBusy(async () => {
       const relays = await this.#requireKeyPackageRelays();
       if (!relays) return;
-      const kp = await this.#client.keyPackages.create({ relays });
+      const current = this.#currentKeyPackage(
+        await this.#client.keyPackages.list(),
+      );
+      const next = current
+        ? await this.#client.keyPackages.rotate(current.keyPackageRef, {
+            relays,
+            d: this.#clientId,
+          })
+        : await this.#client.keyPackages.create({
+            relays,
+            identifier: this.#clientId,
+          });
+      await this.#dropStaleKeyPackages(next.keyPackageRef);
       await this.#refreshKeyPackageSummary();
       this.log(
-        `published KeyPackage ${hexShort(kp.keyPackageRef)} (slot ${kp.identifier ?? "?"}) to ${relays.join(", ")}`,
+        current
+          ? `rotated KeyPackage ${hexShort(current.keyPackageRef)} → ${hexShort(next.keyPackageRef)}`
+          : `published KeyPackage ${hexShort(next.keyPackageRef)} to ${relays.join(", ")}`,
       );
     });
   }
 
-  async rotateKeyPackage(): Promise<void> {
-    await this.#withBusy(async () => {
-      const list = await this.#client.keyPackages.list();
-      const current =
-        list.find((p) => !p.used && p.identifier === this.#clientId) ??
-        list.find((p) => !p.used) ??
-        list[0];
-      if (!current) throw new Error("no KeyPackage to rotate");
-      const relays = await this.#requireKeyPackageRelays();
-      if (!relays) return;
-      const rotated = await this.#client.keyPackages.rotate(
-        current.keyPackageRef,
-        { relays },
+  /**
+   * Fetches the KeyPackages this account's other devices (any slot other than
+   * this client's) have published to its outbox relays, keeping the newest
+   * event per slot. Failures are logged and leave the previous list in place.
+   */
+  async refreshOtherDeviceKeyPackages(): Promise<void> {
+    if (this.#watchAbort || this.#keyPackages.otherDevicesLoading) return;
+    this.#keyPackages = { ...this.#keyPackages, otherDevicesLoading: true };
+    this.#publish();
+    try {
+      await this.#ensureRelayListsLoaded();
+      const relays = relaySet(this.#outboxRelays, this.#relays);
+      // KeyPackages are public: decline authentication for this lookup.
+      const events = await this.#pool.request(
+        relays,
+        { kinds: [ADDRESSABLE_KEY_PACKAGE_KIND], authors: [this.#pubkey] },
+        { waitForAuth: false },
       );
-      await this.#refreshKeyPackageSummary();
-      this.log(
-        `rotated KeyPackage ${hexShort(current.keyPackageRef)} → ${hexShort(rotated.keyPackageRef)}`,
-      );
-    });
+      const newest = new Map<string, NostrEvent>();
+      for (const event of events) {
+        const slot = getKeyPackageIdentifier(event);
+        if (!slot || slot === this.#clientId) continue;
+        const seen = newest.get(slot);
+        if (!seen || event.created_at > seen.created_at)
+          newest.set(slot, event);
+      }
+      const otherDevices = [...newest.entries()]
+        .map(([slot, event]) => ({
+          slot,
+          eventId: event.id,
+          createdAt: event.created_at,
+          refHex: getKeyPackageReference(event) ?? null,
+        }))
+        .sort((a, b) => b.createdAt - a.createdAt);
+      this.#keyPackages = { ...this.#keyPackages, otherDevices };
+    } catch (err) {
+      this.logError(err);
+    } finally {
+      this.#keyPackages = { ...this.#keyPackages, otherDevicesLoading: false };
+      this.#publish();
+    }
   }
 
   /**
@@ -1626,25 +1704,64 @@ export class MarmotController {
     this.#eventStore.add(event);
   }
 
+  /**
+   * Makes sure this client's slot holds an unused, current KeyPackage so others
+   * can invite it: keeps a usable one, rotates a consumed or non-current one,
+   * or publishes the first one. Idempotent; safe to call on every startup.
+   */
   async #ensureKeyPackage(): Promise<void> {
     const existing = await this.#client.keyPackages.list();
     if (this.#watchAbort) return;
-    if (existing.some((pkg) => !pkg.used)) {
+    const current = this.#currentKeyPackage(existing);
+    if (current && !current.used && !current.nonCurrent) {
       this.#setKeyPackageSummary(existing);
       return;
     }
-    // We have no unused KeyPackage to offer, so publish a fresh one — to the
-    // user's OWN outbox relays, and only once both relay lists are known
-    // (R3); #requireKeyPackageRelays has already logged + signalled setup
-    // when they aren't.
+    // This client has no usable KeyPackage to offer, so publish a fresh one —
+    // to the user's OWN outbox relays, and only once both relay lists are
+    // known (R3); #requireKeyPackageRelays has already logged + signalled
+    // setup when they aren't.
     const relays = await this.#requireKeyPackageRelays();
     if (this.#watchAbort || !relays) return;
-    await this.#client.keyPackages.create({ relays });
+    const next = current
+      ? await this.#client.keyPackages.rotate(current.keyPackageRef, {
+          relays,
+          d: this.#clientId,
+        })
+      : await this.#client.keyPackages.create({
+          relays,
+          identifier: this.#clientId,
+        });
     if (this.#watchAbort) return;
+    await this.#dropStaleKeyPackages(next.keyPackageRef);
     await this.#refreshKeyPackageSummary();
     this.log(
       `published a fresh KeyPackage to ${relays.join(", ")} so others can invite you`,
     );
+  }
+
+  /** This client's KeyPackage: the newest-published entry in its slot. */
+  #currentKeyPackage(packages: ListedKeyPackage[]): ListedKeyPackage | null {
+    let current: ListedKeyPackage | null = null;
+    for (const pkg of packages) {
+      if (pkg.identifier !== this.#clientId) continue;
+      if (!current || publishedAt(pkg) > publishedAt(current)) current = pkg;
+    }
+    return current;
+  }
+
+  /**
+   * Removes local private material for older KeyPackages in this client's
+   * slot. Their relay events are already superseded by the newer one in the
+   * same `d` slot, so this is local-only.
+   */
+  async #dropStaleKeyPackages(keepRef: Uint8Array): Promise<void> {
+    const keep = hex(keepRef);
+    for (const pkg of await this.#client.keyPackages.list()) {
+      if (pkg.identifier !== this.#clientId) continue;
+      if (hex(pkg.keyPackageRef) === keep) continue;
+      await this.#client.keyPackages.remove(pkg.keyPackageRef);
+    }
   }
 
   async #refreshKeyPackageSummary(): Promise<void> {
@@ -1652,27 +1769,14 @@ export class MarmotController {
     this.#publish();
   }
 
-  #setKeyPackageSummary(
-    packages: Awaited<ReturnType<MarmotClient["keyPackages"]["list"]>>,
-  ): void {
-    const current =
-      packages.find((pkg) => !pkg.used && pkg.identifier === this.#clientId) ??
-      packages.find((pkg) => !pkg.used) ??
-      packages[0];
-    const newestPublished = packages
-      .flatMap((pkg) => pkg.published ?? [])
-      .reduce<NostrEvent | null>(
-        (newest, event) =>
-          !newest || event.created_at > newest.created_at ? event : newest,
-        null,
-      );
+  #setKeyPackageSummary(packages: ListedKeyPackage[]): void {
+    const current = this.#currentKeyPackage(packages);
+    const latest = current ? latestPublished(current) : null;
     this.#keyPackages = {
-      total: packages.length,
-      unused: packages.filter((pkg) => !pkg.used).length,
-      slot: current?.identifier ?? null,
-      newestPublishedAt: newestPublished?.created_at ?? null,
-      newestPublishedId: newestPublished?.id ?? null,
+      ...this.#keyPackages,
       current: current ? keyPackageDetails(current) : null,
+      publishedAt: latest?.created_at ?? null,
+      publishedId: latest?.id ?? null,
     };
   }
 
@@ -1725,6 +1829,9 @@ export class MarmotController {
     if (this.#watchAbort) return;
     const id = group.idStr;
     this.#groups.set(id, group);
+    // Re-publish an ACK-uncertain commit byte-for-byte after restart. The
+    // hydrated session stays PendingPublish until the relay really accepts it.
+    void group.retryPendingPublication().catch((error) => this.logError(error));
     if (!this.#messages.has(id)) this.#messages.set(id, []);
     if (!this.#bound.has(id)) {
       group.on("stateChanged", () => this.#publish());
@@ -1964,8 +2071,9 @@ export class MarmotController {
     const refs = getMediaAttachments(rumor.tags);
     const attachments = refs.length
       ? refs.map((att) => {
-          this.#registerMedia(group, att);
-          return this.#toChatAttachment(group, att);
+          const sourceParent = rumor.id;
+          this.#registerMedia(group, att, sourceParent);
+          return this.#toChatAttachment(group, att, sourceParent);
         })
       : undefined;
     return {
@@ -1983,10 +2091,15 @@ export class MarmotController {
   }
 
   /** Builds the display skeleton for an attachment, overlaying current fetch state. */
-  #toChatAttachment(group: MarmotGroup, att: MediaAttachment): ChatAttachment {
-    const rec = this.#mediaIndex.get(group.idStr)?.get(att.ciphertextSha256);
+  #toChatAttachment(
+    group: MarmotGroup,
+    att: MediaAttachment,
+    sourceParent?: string,
+  ): ChatAttachment {
+    const id = this.#mediaKey(att, sourceParent);
+    const rec = this.#mediaIndex.get(group.idStr)?.get(id);
     return {
-      id: att.ciphertextSha256,
+      id,
       filename: att.filename,
       mediaType: att.mediaType,
       dim: att.dim,
@@ -2018,59 +2131,55 @@ export class MarmotController {
    * fetch+decrypt. Keyed by `ciphertextSha256`, so a blob referenced by several
    * messages is fetched once and shared.
    */
-  #registerMedia(group: MarmotGroup, att: MediaAttachment): void {
+  #mediaKey(att: MediaAttachment, sourceParent?: string): string {
+    return JSON.stringify([
+      sourceParent,
+      att.version,
+      att.ciphertextSha256,
+      att.plaintextSha256,
+      att.nonce,
+      att.mediaType,
+      att.filename,
+    ]);
+  }
+
+  #registerMedia(
+    group: MarmotGroup,
+    att: MediaAttachment,
+    sourceParent?: string,
+  ): void {
     const gid = group.idStr;
     let index = this.#mediaIndex.get(gid);
     if (!index) this.#mediaIndex.set(gid, (index = new Map()));
-    if (index.has(att.ciphertextSha256)) return;
-    index.set(att.ciphertextSha256, { attachment: att, status: "pending" });
-    void this.#fetchMedia(group, att);
+    const key = this.#mediaKey(att, sourceParent);
+    if (index.has(key)) return;
+    index.set(key, { attachment: att, status: "pending" });
+    void this.#fetchMedia(group, att, key, sourceParent);
   }
 
-  /** Seeds a known plaintext (e.g. our own outgoing file) as already-decrypted. */
-  #seedMedia(group: MarmotGroup, att: MediaAttachment, data: Uint8Array): void {
-    const gid = group.idStr;
-    let index = this.#mediaIndex.get(gid);
-    if (!index) this.#mediaIndex.set(gid, (index = new Map()));
-    index.set(att.ciphertextSha256, { attachment: att, status: "ready", data });
-  }
-
-  /**
-   * Fetches an attachment's ciphertext from its Blossom locator(s) — explicit
-   * first, then the group policy's `default_blob_endpoints` fallbacks — and
-   * decrypts it via the library (which verifies both content hashes). Updates
-   * the media index and re-projects so the row flips pending → fetching →
-   * ready/error.
-   *
-   * NOTE: `decryptMedia` tries the current epoch's key plus every still-retained
-   * epoch's key, so media sent before the local tip advanced still decrypts.
-   * Media from an epoch already pruned past the engine's rollback horizon can no
-   * longer be decrypted.
-   */
-  async #fetchMedia(group: MarmotGroup, att: MediaAttachment): Promise<void> {
-    const rec = this.#mediaIndex.get(group.idStr)?.get(att.ciphertextSha256);
+  async #fetchMedia(
+    group: MarmotGroup,
+    att: MediaAttachment,
+    key: string,
+    sourceParent?: string,
+  ): Promise<void> {
+    const rec = this.#mediaIndex.get(group.idStr)?.get(key);
     if (!rec) return;
     rec.status = "fetching";
     this.#projectTimeline(group);
     try {
-      const policy =
-        group.groupData?.encryptedMedia ?? this.#defaultMediaPolicy();
-      const urls = resolveMediaFetchUrls(att, policy);
-      if (!urls.length) throw new Error("no fetchable locator for attachment");
-
-      let encrypted: Uint8Array | undefined;
-      let lastError: unknown;
-      for (const url of urls) {
-        try {
-          encrypted = await downloadEncryptedBlob(url);
-          break;
-        } catch (err) {
-          lastError = err;
-        }
-      }
-      if (!encrypted) throw lastError ?? new Error("all blob locators failed");
-
-      const stored = await group.decryptMedia(encrypted, att);
+      const authenticatedSource =
+        sourceParent && (await group.session.mediaSourceForRumor(sourceParent));
+      if (!authenticatedSource)
+        throw new Error("Attachment source material is no longer available");
+      const stored = await downloadMediaAttachment(
+        group,
+        att,
+        authenticatedSource,
+        {
+          transport: createBlossomMediaTransport({ signer: group.signer }),
+        },
+      );
       rec.data = stored.data;
       rec.status = "ready";
     } catch (err) {
@@ -2081,18 +2190,8 @@ export class MarmotController {
     this.#projectTimeline(group);
   }
 
-  /** The Blossom base URL to upload to, from the group policy or the fallback. */
-  #uploadServer(group: MarmotGroup): string {
-    const policy =
-      group.groupData?.encryptedMedia ?? this.#defaultMediaPolicy();
-    const endpoint = policy.defaultBlobEndpoints.find(
-      (e) => e.locatorKind === BLOSSOM_LOCATOR_KIND,
-    );
-    return endpoint?.baseUrl ?? DEFAULT_BLOSSOM_SERVERS[0];
-  }
-
   /** Lazily builds (and caches) the fallback Blossom media policy. */
-  #defaultMediaPolicy(): EncryptedMediaPolicyV1 {
+  #defaultMediaPolicy(): EncryptedMediaPolicyV2 {
     return (this.#defaultMediaPolicyCache ??= encryptedMediaBlossomDefault(
       DEFAULT_BLOSSOM_SERVERS,
     ));

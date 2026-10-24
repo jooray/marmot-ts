@@ -9,25 +9,26 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
   contents: write # For creating releases
-  id-token: write # For npm provenance
+  id-token: write # For npm trusted publishing and provenance
 
 jobs:
   release:
     name: Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    environment: npm
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: "pnpm"
@@ -39,7 +40,7 @@ jobs:
           echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
 
       - name: Setup pnpm cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -49,11 +50,8 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Configure NPM
-        run: |
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Setup npm trusted publishing
+        run: npm install --global npm@^11.15.0
 
       - name: Validate release tag and changelog
         env:
@@ -74,15 +72,16 @@ jobs:
           fs.writeFileSync("release-notes.md", notes + "\n");
           NODE
 
-      - name: Publish to npm
+      - name: Stage npm publish
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if npm view "@internet-privacy/marmot-ts@${RELEASE_TAG#v}" version >/dev/null 2>&1; then
-            echo "Version ${RELEASE_TAG#v} is already on npm; skipping publish"
+            echo "Version ${RELEASE_TAG#v} is already on npm; skipping staging"
           else
-            pnpm release
+            pnpm build
+            node scripts/verify-package-tarball.mjs --check-fork-unpublished
+            npm stage publish --access public --provenance
           fi
 
       - name: Create GitHub release
