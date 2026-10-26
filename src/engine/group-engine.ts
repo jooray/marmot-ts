@@ -311,6 +311,8 @@ export type MarmotGroupEngineOptions<TEnvelope> = {
   ciphersuite: CiphersuiteImpl;
   peeler: GroupPeeler<TEnvelope>;
   onStateChanged?: (state: ClientState) => void;
+  /** Lifecycle or derived convergence inputs changed; read current getters. */
+  onChanged?: () => void;
   /** Synchronous terminal fence before exposing the selected state to observers. */
   onSelectedDisband?: (
     evidence: DisbandCandidateEvidence,
@@ -446,6 +448,7 @@ export class MarmotGroupEngine<TEnvelope> {
   readonly #sentContentIds = new Map<string, number>();
 
   readonly #onStateChanged?: (state: ClientState) => void;
+  readonly #onChanged?: () => void;
   readonly #onSelectedDisband?: MarmotGroupEngineOptions<TEnvelope>["onSelectedDisband"];
 
   /** Injectable wall-clock for the convergence quiescence window (B5). */
@@ -496,6 +499,7 @@ export class MarmotGroupEngine<TEnvelope> {
     this.ciphersuite = options.ciphersuite;
     this.peeler = options.peeler;
     this.#onStateChanged = options.onStateChanged;
+    this.#onChanged = options.onChanged;
     this.#onSelectedDisband = options.onSelectedDisband;
     this.#now = options.now ?? (() => performance.now());
     this.#wallNow = Date.now;
@@ -733,6 +737,7 @@ export class MarmotGroupEngine<TEnvelope> {
           if (epoch < plan.floorEpoch && !pinned.has(id)) identities.delete(id);
     }
     this.#mutationRevision++;
+    this.#onChanged?.();
   }
 
   /** @internal Observable retention pressure, including unfinished exact pins. */
@@ -2711,6 +2716,7 @@ export class MarmotGroupEngine<TEnvelope> {
         this.admitConvergencePass();
         this.#lastPassUnresolved = unresolved;
         this.#lastPassBlocked = blocked;
+        this.#onChanged?.();
         // The window just reset; arm the settle-check so queued outbound is
         // re-evaluated once it elapses (B5). Reschedules any prior pending check.
         this.#scheduleSettleCheck();
@@ -3295,6 +3301,7 @@ export class MarmotGroupEngine<TEnvelope> {
     // Preserve synchronous wakeup timing; own the callback until any returned promise settles.
     this.#activeAdmissions++;
     try {
+      this.#onChanged?.();
       return Promise.resolve(this.#onSettleCheck?.()).finally(async () => {
         this.#activeAdmissions--;
         if (!this.#activeAdmissions) await completeSettledRetentionOwner(this);
@@ -3625,6 +3632,7 @@ export class MarmotGroupEngine<TEnvelope> {
     const previous = this.#lifecycle;
     this.#lifecycle = transitionLifecycle(this.#lifecycle, next);
     this.#mutationRevision++;
+    this.#onChanged?.();
     this.#emitAudit({
       type: "epoch_state_changed",
       previous_state: auditEpochStateName(previous),

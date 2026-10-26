@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+## 0.9.0
+
 ### Added
+
+- Build reactive group UIs with stable synchronous snapshots, a single `changed` event, cancellable per-group watchers, and an opt-in group-list watcher covering metadata, membership, lifecycle, convergence settlement, and Welcome delivery changes.
 
 - Inspect rejected media attachments with typed reasons and stable attachment positions using `parseMediaAttachment` and `getMediaAttachmentOutcomes`.
 

@@ -1,6 +1,6 @@
 # UI Frameworks
 
-`MarmotClient` exposes reactive APIs through manager **async generators** (`client.groups.watch()` and `client.keyPackages.watchKeyPackages()`) that emit updates whenever state changes. To integrate with UI frameworks, you'll need to convert these async generators into your framework's native reactivity system.
+`MarmotGroup.snapshot` and `client.groups.snapshot` provide synchronous, reference-stable UI state with `changed` events. Async watchers are also available. The default `client.groups.watch()` observes group-set changes; opt into `includeStateChanges` to also observe metadata, membership, lifecycle, convergence and Welcome outcomes.
 
 This guide shows how to consume these async iterators in different frameworks and patterns for managing the client instance lifecycle.
 
@@ -66,87 +66,76 @@ await iterator.return?.();
 
 ## React Integration
 
-### Custom Hook Pattern
+### Synchronous snapshots with `useSyncExternalStore`
 
-Create a **fresh generator on every effect run** and close it in the cleanup. React 18 StrictMode runs effects twice in development, and a closed generator can't be iterated again, so don't cache the generator in a `useRef`:
+Use the per-group snapshot for a group header or settings page. It updates only
+when that group's visible state changes:
 
 ```typescript
-import { useState, useEffect } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import type { MarmotClient, MarmotGroup } from "@internet-privacy/marmot-ts";
 
-function useWatchGroups(client: MarmotClient | null) {
-  const [groups, setGroups] = useState<MarmotGroup[]>([]);
-
-  useEffect(() => {
-    if (!client) {
-      setGroups([]);
-      return;
-    }
-
-    const gen = client.groups.watch(); // fresh generator per effect run
-    let cancelled = false;
-
-    (async () => {
-      for await (const value of gen) {
-        if (cancelled) break;
-        setGroups(value);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      void gen.return(undefined); // finishes once the pending update resolves
-    };
-  }, [client]);
-
-  return groups;
+function useGroupSnapshot(group: MarmotGroup) {
+  const subscribe = useCallback((notify: () => void) => {
+    group.on("changed", notify);
+    return () => { group.off("changed", notify); };
+  }, [group]);
+  const getSnapshot = useCallback(() => group.snapshot, [group]);
+  return useSyncExternalStore(subscribe, getSnapshot);
 }
 
-// Usage
-function GroupList({ client }) {
-  const groups = useWatchGroups(client);
+function useGroups(client: MarmotClient) {
+  const subscribe = useCallback((notify: () => void) => {
+    client.groups.on("changed", notify);
+    return () => { client.groups.off("changed", notify); };
+  }, [client]);
+  const getSnapshot = useCallback(() => client.groups.snapshot, [client]);
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
 
+function GroupList({ client }: { client: MarmotClient }) {
+  const groups = useGroups(client);
   return (
     <ul>
       {groups.map(group => (
-        <li key={group.idStr}>{group.groupData?.name ?? "(disbanded)"}</li>
+        <li key={group.id}>{group.groupData?.name ?? "(disbanded)"}</li>
       ))}
     </ul>
   );
 }
 ```
 
-**Key points:**
+The manager snapshot contains read-only snapshots of currently loaded groups.
+Hydrate persisted groups with `await client.groups.loadAll()` during application
+startup. The getter itself never reads storage, and unaffected groups keep their
+snapshot identity when another group changes. Server-rendered applications must
+also supply an appropriate `getServerSnapshot` to React.
 
-- A new generator per effect run survives StrictMode double-mounts and `client` changes
-- The `cancelled` flag prevents state updates after unmount
-- `gen.return()` doesn't finish right away. While the generator is waiting for the next change, the return is queued, and its listener is removed only when the next `updated` event fires.
+### Async group watching
 
-**Immediate teardown with events:** if you need the listener removed as soon as the component unmounts, use the manager's events directly:
+For frameworks that prefer streams, create a fresh watcher for each mount and
+abort it during cleanup:
 
 ```typescript
-function useGroups(client: MarmotClient | null) {
-  const [groups, setGroups] = useState<MarmotGroup[]>([]);
+const controller = new AbortController();
+const watcher = client.groups.watch({
+  includeStateChanges: true,
+  signal: controller.signal,
+});
 
-  useEffect(() => {
-    if (!client) {
-      setGroups([]);
-      return;
-    }
-    let cancelled = false;
-    client.groups.loadAll().then((initial) => {
-      if (!cancelled) setGroups(initial);
-    });
-    client.groups.on("updated", setGroups);
-    return () => {
-      cancelled = true;
-      client.groups.off("updated", setGroups);
-    };
-  }, [client]);
+(async () => {
+  for await (const groups of watcher) updateUI(groups);
+})();
 
-  return groups;
-}
+// On unmount: detaches immediately and wakes a pending next().
+controller.abort();
 ```
+
+This mode yields loaded group instances immediately without a storage read.
+Read `group.snapshot` for reference-stable per-group values. It may coalesce
+updates while the consumer is busy. A per-group `group.watch({ signal })` yields
+snapshots directly and ends on disposal or destruction. Both watcher modes also
+support immediate cleanup through `return()`.
 
 **Reusable for key packages:**
 

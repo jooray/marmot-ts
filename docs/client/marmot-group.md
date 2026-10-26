@@ -15,6 +15,52 @@ group.state; // the underlying MLS ClientState (advanced API)
 group.relays; // string[] | undefined — the group's Nostr relays
 ```
 
+### Reactive UI snapshots
+
+`group.snapshot` is a synchronous, cached `MarmotGroupSnapshot`. Its identity stays
+stable until `group.on("changed", listener)` fires. The event receives the group;
+the new snapshot is already installed when the listener runs. `group.version`
+increases with each notification.
+
+The snapshot contains the group ID, metadata, members, epoch, membership status,
+profile support, lifecycle, convergence status, Welcome delivery outcomes and
+failed `pendingWelcomes`. `historyVersion` also changes when the history/fork
+projection changes without a new epoch. Snapshots contain no MLS private state.
+Metadata and delivery records are owned copies; objects and arrays are frozen.
+Treat copied byte arrays as read-only too. Derived members and metadata are reused
+across lifecycle-only changes. Welcome outcomes remain in-memory only.
+
+```typescript
+const initial = group.snapshot; // no storage read
+const onChanged = () => render(group.snapshot);
+group.on("changed", onChanged);
+// Later:
+group.off("changed", onChanged);
+
+// Alternatively, consume the current value followed by changes:
+for await (const snapshot of group.watch({ signal })) {
+  render(snapshot);
+}
+```
+
+Notifications describe distinct visible states. A local commit can emit several
+notifications as it moves through `PendingPublish`, `Merging` and `Stable`.
+Clock-driven convergence settlement also emits, without another inbound event.
+Async watchers yield the latest value and may coalesce changes while the consumer
+is busy; use the synchronous event when every published snapshot matters.
+
+`return()`, `throw()` and abort detach watcher listeners and wake a pending
+`next()`. `dispose()` and `destroy()` end group watchers. Disbanding publishes the
+terminal snapshot but keeps the watcher available until disposal. These are
+client observation APIs; they do not alter the lifecycle or convergence rules in
+`protocol-core/group-state.md`.
+
+For a group list, use `client.groups.snapshot` plus its `changed` event, or
+`client.groups.watch({ includeStateChanges: true, signal })`. These APIs observe
+loaded groups without reading storage. Call `loadAll()` separately to hydrate
+persisted groups. The default `groups.watch()` retains its storage-loading,
+group-set-only behavior. See [UI Frameworks](/client/ui-frameworks) for React hooks.
+
 ### Group metadata — `group.groupData`
 
 `groupData` is a `MarmotGroupView | null` projected from the group's app components:

@@ -1,3 +1,5 @@
+import { watchCurrent } from "../utils/watch-current.js";
+import type { MarmotGroupSnapshot } from "./group/marmot-group.js";
 import { isReusableKeyPackage } from "../core/key-package.js";
 /** @module @category Client - Group Manager */
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -280,6 +282,8 @@ export type GroupsManagerEvents<
   THistory extends BaseGroupHistory | undefined = any,
   TMedia extends BaseGroupMedia | undefined = any,
 > = {
+  /** Emitted after the loaded set or any loaded group snapshot changes. */
+  changed: (snapshots: readonly MarmotGroupSnapshot[]) => void;
   /** Emitted when the set of loaded groups changes */
   updated: (groups: MarmotGroup<THistory, TMedia>[]) => void;
   /** Emitted when a group is loaded from the store */
@@ -383,6 +387,47 @@ export class GroupsManager<
   /** Holds each group's backfill cursor alongside its ingest state. */
   readonly #ingestStateStore: GenericKeyValueStore<Uint8Array>;
 
+  #snapshot: readonly MarmotGroupSnapshot[] = Object.freeze([]);
+  readonly #snapshotListeners = new Map<
+    MarmotGroup<THistory, TMedia>,
+    () => void
+  >();
+
+  /** Synchronous UI snapshots of loaded groups; stable until `changed`. No storage reads. */
+  get snapshot(): readonly MarmotGroupSnapshot[] {
+    return this.#snapshot;
+  }
+
+  #refreshSnapshot = (): void => {
+    const next = this.loaded.map((group) => group.snapshot);
+    if (
+      next.length === this.#snapshot.length &&
+      next.every((snapshot, index) => snapshot === this.#snapshot[index])
+    )
+      return;
+    this.#snapshot = Object.freeze(next);
+    this.emit("changed", this.#snapshot);
+  };
+
+  #trackSnapshots(groups: MarmotGroup<THistory, TMedia>[]): void {
+    const live = new Set(groups);
+    for (const [group, detach] of this.#snapshotListeners)
+      if (!live.has(group)) detach();
+    for (const group of groups) {
+      if (this.#snapshotListeners.has(group) || group.closedSignal.aborted)
+        continue;
+      const detach = () => {
+        group.off("changed", this.#refreshSnapshot);
+        group.off("disposed", detach);
+        this.#snapshotListeners.delete(group);
+      };
+      this.#snapshotListeners.set(group, detach);
+      group.on("changed", this.#refreshSnapshot);
+      group.on("disposed", detach);
+    }
+    this.#refreshSnapshot();
+  }
+
   constructor(options: GroupsManagerOptions<THistory, TMedia>) {
     super();
     const capacity = options.maxPendingImageMutations ?? 16;
@@ -436,7 +481,10 @@ export class GroupsManager<
     });
 
     // Forward the registry's cache-level events as our own.
-    this.#registry.on("updated", (groups) => this.emit("updated", groups));
+    this.#registry.on("updated", (groups) => {
+      this.#trackSnapshots(groups);
+      this.emit("updated", groups);
+    });
     this.#registry.on("loaded", (group) => this.emit("loaded", group));
     this.#registry.on("removed", (group) => this.emit("removed", group.id));
     this.#registry.on("disbanded", (group, evidence) =>
@@ -1616,8 +1664,20 @@ export class GroupsManager<
    * whenever the store changes.
    */
   watch(options?: {
+    /** Watch loaded groups and their UI state without loading storage. Call loadAll() to hydrate first. */
+    includeStateChanges?: boolean;
     signal?: AbortSignal;
   }): AsyncGenerator<MarmotGroup<THistory, TMedia>[]> {
+    if (options?.includeStateChanges) {
+      return watchCurrent({
+        read: () => this.loaded,
+        subscribe: (changed) => {
+          this.on("changed", changed);
+          return () => this.off("changed", changed);
+        },
+        signal: options.signal,
+      });
+    }
     const manager = this;
     const signal = options?.signal;
     let cancelled = false;
