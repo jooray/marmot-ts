@@ -225,6 +225,8 @@ export type GroupSessionOptions<
   ingestionPool?: IngestionPoolOptions;
   history?: THistory;
   onStateChanged?: (state: ClientState) => void;
+  /** Lifecycle, convergence or membership authority changed. */
+  onChanged?: () => void;
   onStateSaved?: () => void;
   onApplicationMessage?: (message: Uint8Array) => void;
   onHistoryError?: (error: Error) => void;
@@ -338,6 +340,7 @@ export class GroupSession<
   >();
 
   readonly #onStateChanged?: (state: ClientState) => void;
+  readonly #onChanged?: () => void;
   readonly #onStateSaved?: () => void;
   readonly #onApplicationMessage?: (message: Uint8Array) => void;
   readonly #onHistoryError?: (error: Error) => void;
@@ -352,6 +355,7 @@ export class GroupSession<
     this.#removedMarkerStore = options.removedMarkerStore;
     this.history = options.history as THistory;
     this.#onStateChanged = options.onStateChanged;
+    this.#onChanged = options.onChanged;
     this.#onStateSaved = options.onStateSaved;
     this.#onApplicationMessage = options.onApplicationMessage;
     this.#onHistoryError = options.onHistoryError;
@@ -439,6 +443,9 @@ export class GroupSession<
           await this.#write(() => this.lifecycleStore!.clear());
         },
       },
+      onChanged: () => {
+        if (!this.#destroyed && !this.#disposed) this.#onChanged?.();
+      },
       onStateChanged: (newState) => {
         if (this.#destroyed || this.#disposed) return;
         this.#dirty = true;
@@ -504,6 +511,7 @@ export class GroupSession<
             `${bytesToHex(this.id)}/removed`,
           );
     this.#removalFenced = !!bytes || marker === true;
+    this.#onChanged?.();
     if (!bytes) return;
     try {
       const record = JSON.parse(
@@ -548,6 +556,7 @@ export class GroupSession<
   async #persistRemovalEvidence(evidence: RemovalEvidence): Promise<void> {
     if (!this.#removalFenced) this.#clearPublications();
     this.#removalFenced = true;
+    this.#onChanged?.();
     if (this.lifecycleStore)
       await this.#write(() =>
         this.lifecycleStore!.setItem(
@@ -971,6 +980,7 @@ export class GroupSession<
     )
       return;
     this.#removalFenced = true;
+    this.#onChanged?.();
     if (this.state.groupActiveState.kind === "removedFromGroup") {
       const removedState = this.state;
       const recovered = await this.#engine.recoverRemovedFromAnchor(
@@ -1019,6 +1029,7 @@ export class GroupSession<
     );
     this.#removalEvidence = undefined;
     this.#removalFenced = false;
+    this.#onChanged?.();
     this.#registerRetentionOwners();
   }
 
@@ -1281,6 +1292,7 @@ export class GroupSession<
       tombstone,
       registryState: serializeClientState(scrubTerminalRegistryState(state)),
     };
+    this.#onChanged?.();
   }
 
   async #finishDisbandProjection(): Promise<void> {
@@ -1356,6 +1368,7 @@ export class GroupSession<
         scrubTerminalRegistryState(this.state),
       ),
     };
+    this.#onChanged?.();
     await this.#write(() => this.#finishDisbandProjection());
   }
 
