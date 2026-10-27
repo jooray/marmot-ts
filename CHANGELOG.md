@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- `watchKeyPackages()`, `invites.watchUnread()`, `invites.watchReceived()`, `watchInvites()`, and `history.subscribe()` accept an optional `{ signal }` to stop watching, matching `groups.watch()`.
+
+### Fixed
+
+- Key-package, invite, and history watchers now close immediately on `return()` or abort, even while waiting or reading storage, and no longer miss changes that arrive while your loop body is running.
+- `watchInvites()` now updates an invite's `joinable` flag when key packages are added, removed, or updated.
+
 ## 0.9.0
 
 ### Added

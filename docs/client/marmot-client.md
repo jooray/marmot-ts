@@ -302,7 +302,7 @@ const abortController = new AbortController();
 abortController.abort();
 ```
 
-Passing the signal detaches listeners and wakes a pending `next()` immediately. Calling `return()` also cleans up immediately. For UI integrations, see [UI Framework Integration](/client/ui-frameworks).
+Passing the signal detaches listeners and wakes a pending `next()` immediately, even while a storage read is in flight. Calling `return()`, `throw()`, or async disposal also cleans up immediately. The same `{ signal }` option is accepted by `client.keyPackages.watchKeyPackages()`, `client.invites.watchUnread()`, `client.invites.watchReceived()`, `client.watchInvites()`, and `group.history.subscribe(filters, { signal })`. Changes that arrive while your loop body runs are kept and may coalesce into one fresh snapshot. For UI integrations, see [UI Framework Integration](/client/ui-frameworks).
 
 ### Events for Lifecycle Hooks
 

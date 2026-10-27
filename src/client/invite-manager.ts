@@ -1,4 +1,5 @@
 /** @module @category Client - Invite Manager */
+import { watchCurrent } from "../utils/watch-current.js";
 import { unlockGiftWrap } from "applesauce-common/helpers/gift-wrap";
 import type { Rumor } from "applesauce-common/helpers/gift-wrap";
 import type { EventSigner } from "applesauce-core/factories";
@@ -415,49 +416,64 @@ export class InviteManager extends EventEmitter<InviteManagerEvents> {
    * Watch for unread invites.
    *
    * Yields the current array of unread invites, then yields again
-   * whenever the unread list changes (via 'newInvite' or 'inviteRead' events).
+   * whenever the unread list changes (via 'decrypted' or 'read' events).
    *
    * This does NOT automatically mark invites as read - the app must
    * call markAsRead() after processing each invite.
+   *
+   * Pass an AbortSignal to stop watching. Abort, return, throw, and async
+   * disposal release listeners and interrupt pending reads without another event.
+   * Abandoned reads may finish internally; their results are ignored.
    */
-  async *watchUnread(): AsyncGenerator<UnreadInvite[]> {
-    yield await this.getUnread();
+  watchUnread(
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<UnreadInvite[]> {
+    return watchCurrent({
+      ...options,
+      read: () => this.getUnread(),
+      subscribe: (changed) => this.onUnreadChanged(changed),
+    });
+  }
 
-    while (true) {
-      await new Promise<void>((resolve) => {
-        const handler = () => {
-          resolve();
-          this.off("decrypted", handler);
-          this.off("read", handler);
-        };
-        this.once("decrypted", handler);
-        this.once("read", handler);
-      });
-      yield await this.getUnread();
-    }
+  /**
+   * Calls `changed` whenever the unread list may have changed.
+   * Returns a function that removes the listeners.
+   * @internal
+   */
+  onUnreadChanged(changed: () => void): () => void {
+    this.on("decrypted", changed);
+    this.on("read", changed);
+    return () => {
+      this.off("decrypted", changed);
+      this.off("read", changed);
+    };
   }
 
   /**
    * Watch for received (encrypted) invites.
    *
    * Yields the current list of received gift wraps, then yields again
-   * whenever the received list changes (via 'ReceivedGiftWrap' or 'receivedProcessed' events).
+   * whenever the received list changes (via 'received' or 'processed' events).
+   *
+   * Pass an AbortSignal to stop watching. Abort, return, throw, and async
+   * disposal release listeners and interrupt pending reads without another event.
+   * Abandoned reads may finish internally; their results are ignored.
    */
-  async *watchReceived(): AsyncGenerator<ReceivedGiftWrap[]> {
-    yield await this.getReceived();
-
-    while (true) {
-      await new Promise<void>((resolve) => {
-        const handler = () => {
-          resolve();
-          this.off("received", handler);
-          this.off("processed", handler);
+  watchReceived(
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<ReceivedGiftWrap[]> {
+    return watchCurrent({
+      ...options,
+      read: () => this.getReceived(),
+      subscribe: (changed) => {
+        this.on("received", changed);
+        this.on("processed", changed);
+        return () => {
+          this.off("received", changed);
+          this.off("processed", changed);
         };
-        this.once("received", handler);
-        this.once("processed", handler);
-      });
-      yield await this.getReceived();
-    }
+      },
+    });
   }
 
   /**
