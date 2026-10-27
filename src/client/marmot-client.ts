@@ -1,4 +1,5 @@
 /** @module @category Client - Marmot Client */
+import { watchCurrent } from "../utils/watch-current.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { isRumor, Rumor } from "applesauce-common/helpers/gift-wrap";
 import { EventSigner } from "applesauce-core";
@@ -387,17 +388,40 @@ export class MarmotClient<
    * Like {@link InviteManager.watchUnread}, but annotates each invite with
    * whether it's {@link canJoinInvite | joinable}. Lets an app default to showing
    * only acceptable invites while still being able to reveal the rest.
+   *
+   * Pass an AbortSignal to stop watching. Abort, return, throw, and async
+   * disposal release listeners and interrupt pending reads without another event.
+   * Abandoned reads may finish internally; their results are ignored.
    */
-  async *watchInvites(): AsyncGenerator<AnnotatedInvite[]> {
-    for await (const invites of this.invites.watchUnread()) {
-      const joinable = await Promise.all(
-        invites.map((invite) => this.canJoinInvite(invite)),
-      );
-      yield invites.map((invite, index) => ({
-        invite,
-        joinable: joinable[index]!,
-      }));
-    }
+  watchInvites(
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<AnnotatedInvite[]> {
+    return watchCurrent({
+      ...options,
+      read: async () => {
+        const invites = await this.invites.getUnread();
+        const joinable = await Promise.all(
+          invites.map((invite) => this.canJoinInvite(invite)),
+        );
+        return invites.map((invite, index) => ({
+          invite,
+          joinable: joinable[index]!,
+        }));
+      },
+      subscribe: (changed) => {
+        const offInvites = this.invites.onUnreadChanged(changed);
+        // Joinability depends on which KeyPackages are held locally.
+        this.keyPackages.on("added", changed);
+        this.keyPackages.on("removed", changed);
+        this.keyPackages.on("updated", changed);
+        return () => {
+          offInvites();
+          this.keyPackages.off("added", changed);
+          this.keyPackages.off("removed", changed);
+          this.keyPackages.off("updated", changed);
+        };
+      },
+    });
   }
 
   /**
