@@ -1,4 +1,5 @@
 /** @module @category Client - Group History */
+import { watchCurrent } from "../../utils/watch-current.js";
 import type { Rumor } from "applesauce-common/helpers/gift-wrap";
 import type { Filter } from "applesauce-core/helpers/filter";
 import { compileFilters } from "applesauce-core/helpers/filter";
@@ -90,48 +91,37 @@ export class GroupRumorHistory
    * snapshot is freshly queried so removal refills limited pages. Changes
    * during loading or paused consumption are latched until the next pull.
    *
-   * The generator runs until the caller breaks out of the loop or the consuming
-   * iterator is garbage-collected (via the `finally` cleanup).
+   * Abort, return, throw, or async disposal promptly releases listeners, even
+   * while a query is pending. Explicitly close iterators when no longer needed.
    */
-  async *subscribe(filters?: Filter | Filter[]): AsyncGenerator<Rumor[]> {
-    const filtersArray: Filter[] = filters
+  subscribe(
+    filters?: Filter | Filter[],
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<Rumor[]> {
+    const filtersArray = filters
       ? Array.isArray(filters)
         ? filters
         : [filters]
       : [{}];
-
     const matches = compileFilters<Rumor>(filtersArray);
-    let version = 0;
-    let observed = -1;
-    let wake: (() => void) | undefined;
-    const changed = () => {
-      version++;
-      wake?.();
-      wake = undefined;
-    };
-    const inserted = (rumor: Rumor) => {
-      if (matches(rumor)) changed();
-    };
-    this.on("rumor", inserted);
-    this.on("cleared", changed);
-    this.on("removed", changed);
-    try {
-      while (true) {
-        if (observed === version)
-          await new Promise<void>((resolve) => {
-            wake = resolve;
-          });
-        const snapshotVersion = version;
-        const snapshot = await this.backend.queryRumors(filtersArray);
-        if (snapshotVersion !== version) continue;
-        observed = snapshotVersion;
-        yield [...snapshot];
-      }
-    } finally {
-      this.off("rumor", inserted);
-      this.off("cleared", changed);
-      this.off("removed", changed);
-    }
+    return watchCurrent({
+      ...options,
+      discardStale: true,
+      read: async () => [...(await this.backend.queryRumors(filtersArray))],
+      subscribe: (changed) => {
+        const inserted = (rumor: Rumor) => {
+          if (matches(rumor)) changed();
+        };
+        this.on("rumor", inserted);
+        this.on("cleared", changed);
+        this.on("removed", changed);
+        return () => {
+          this.off("rumor", inserted);
+          this.off("cleared", changed);
+          this.off("removed", changed);
+        };
+      },
+    });
   }
 
   /**

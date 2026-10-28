@@ -42,7 +42,7 @@ const recent = await history.queryRumors({ kinds: [9], limit: 50 });
 
 ## Live timeline — `subscribe`
 
-`subscribe(filters?)` is an async generator that yields a fresh filtered timeline, then reloads it whenever a matching rumor is saved, a rumor is removed, or history is cleared. This is the natural source for a chat view:
+`subscribe(filters?, { signal }?)` is an async generator that yields a fresh filtered timeline, then reloads it whenever a matching rumor is saved, a rumor is removed, or history is cleared. This is the natural source for a chat view:
 
 ```typescript
 for await (const rumors of history.subscribe({ kinds: [9], limit: 100 })) {
@@ -53,6 +53,8 @@ for await (const rumors of history.subscribe({ kinds: [9], limit: 100 })) {
 Both self-sent messages (via `client.groups.send`) and ingested messages (via `group.ingest`) flow through the same subscription, so the UI stays consistent without a separate "echo" path.
 
 Each snapshot applies the filters and `limit` again. Removing a recent rumor refills a limited page from older surviving records. Changes arriving during loading or while your loop body is running remain pending for the next pull; several changes may coalesce into one fresh snapshot. Your backend must return newest-first results and honor the filters. Already-rendered arrays and pagination pages are application-owned snapshots: replace or retract them when you receive an update.
+
+Pass an optional `AbortSignal` as the second argument to stop watching, for example `history.subscribe({ kinds: [9], limit: 100 }, { signal: controller.signal })`. Aborting, `return()`, or async disposal releases listeners immediately, even while a query is pending. Query failures still reject the loop.
 
 ## Pagination — `createPaginatedLoader`
 

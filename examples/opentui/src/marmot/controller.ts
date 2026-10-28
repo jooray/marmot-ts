@@ -586,7 +586,7 @@ export class MarmotController {
   readonly #dispose?: () => void;
 
   readonly #groups = new Map<string, MarmotGroup>();
-  readonly #bound = new Set<string>();
+  readonly #groupsWatchController = new AbortController();
   /** Per-group rumor union (id → message), the source of the rendered timeline. */
   readonly #messageIndex = new Map<string, Map<string, ChatMessage>>();
   /** The rendered, oldest-first timeline projected from {@link #messageIndex}. */
@@ -759,7 +759,7 @@ export class MarmotController {
     // The library owns inbound transport now: connectAll subscribes every group
     // to its kind-445 events (backfill + live, draining ingest), and invites
     // listen() subscribes for gift-wraps on our inbox relays. #watchGroups stays
-    // for app-side bookkeeping (stateChanged → snapshot, history projection).
+    // for app-side bookkeeping (group snapshots and history projection).
     this.#client.groups.on("unreadable", () =>
       this.log("(dropped an unreadable group event)", "warn"),
     );
@@ -783,6 +783,7 @@ export class MarmotController {
   stop(): void {
     if (this.#watchAbort) return;
     this.#watchAbort = true;
+    this.#groupsWatchController.abort();
     this.#inviteConnection?.unsubscribe();
     this.#groupsConnection?.unsubscribe();
     for (const gen of this.#historySubs.values()) void gen.return(undefined);
@@ -1793,18 +1794,21 @@ export class MarmotController {
   }
 
   /**
-   * Consume the library's `groups.watch()` async generator to keep relay
-   * subscriptions in lockstep with the loaded group set (create/join/leave).
-   * The React layer consumes the same generator independently for display.
+   * Consume loaded group snapshots to refresh the list and header, and keep
+   * per-group history projections in step with the loaded set.
    */
   async #watchGroups(): Promise<void> {
     try {
-      for await (const groups of this.#client.groups.watch()) {
+      for await (const groups of this.#client.groups.watch({
+        includeStateChanges: true,
+        signal: this.#groupsWatchController.signal,
+      })) {
         if (this.#watchAbort) break;
         const live = new Set(groups.map((g) => g.idStr));
         for (const group of groups) {
           if (this.#watchAbort) break;
-          if (!this.#groups.has(group.idStr)) {
+          if (this.#groups.get(group.idStr) !== group) {
+            if (this.#groups.has(group.idStr)) this.#detachGroup(group.idStr);
             this.#attachGroup(group);
           }
         }
@@ -1812,6 +1816,7 @@ export class MarmotController {
         for (const id of [...this.#groups.keys()]) {
           if (!live.has(id)) this.#detachGroup(id);
         }
+        this.#publish();
       }
     } catch (err) {
       if (!this.#watchAbort) this.logError(err);
@@ -1819,8 +1824,8 @@ export class MarmotController {
   }
 
   /**
-   * App-side bookkeeping when a group enters the loaded set: track it, bind
-   * `stateChanged` to the snapshot, and start projecting its rumor history into
+   * App-side bookkeeping when a group enters the loaded set: track it
+   * and start projecting its rumor history into
    * the timeline. Inbound relay transport (backfill + live kind-445 ingest) is
    * owned by the library's `groups.connectAll()` (installed in {@link start});
    * this no longer touches the network.
@@ -1833,10 +1838,6 @@ export class MarmotController {
     // hydrated session stays PendingPublish until the relay really accepts it.
     void group.retryPendingPublication().catch((error) => this.logError(error));
     if (!this.#messages.has(id)) this.#messages.set(id, []);
-    if (!this.#bound.has(id)) {
-      group.on("stateChanged", () => this.#publish());
-      this.#bound.add(id);
-    }
     // Project the group's persisted + live rumor history into the timeline: both
     // self-sent (via `send`) and ingested messages are saved to group.history.
     // The first yield is the persisted backlog from disk, so reopening a group

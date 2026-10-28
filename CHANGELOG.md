@@ -4,12 +4,25 @@
 
 ### Added
 
+- `watchKeyPackages()`, `invites.watchUnread()`, `invites.watchReceived()`, `watchInvites()`, and `history.subscribe()` accept an optional `{ signal }` to stop watching, matching `groups.watch()`.
+
+### Fixed
+
+- Key-package, invite, and history watchers now close immediately on `return()` or abort, even while waiting or reading storage, and no longer miss changes that arrive while your loop body is running.
+- `watchInvites()` now updates an invite's `joinable` flag when key packages are added, removed, or updated.
+- Inviting from a kind 30443 event now checks that its tags describe the KeyPackage it carries, as MDK does: the `i` tag must be the KeyPackageRef, and `mls_ciphersuite`, `mls_extensions`, `mls_proposals` and `app_components` must each appear once and match the decoded LeafNode (`mls_proposals` with the same GREASE rules as `checkKeyPackageProposalsTag`). White Noise already rejected these events, so marmot-ts could invite from a KeyPackage other clients ignore. The check is exported as `validateKeyPackageEventMetadata` and throws `KeyPackageEventMetadataError`.
+
+## 0.9.0
+
+### Added
+
+- Build reactive group UIs with stable synchronous snapshots, a single `changed` event, cancellable per-group watchers, and an opt-in group-list watcher covering metadata, membership, lifecycle, convergence settlement, and Welcome delivery changes.
+
 - Inspect rejected media attachments with typed reasons and stable attachment positions using `parseMediaAttachment` and `getMediaAttachmentOutcomes`.
 
 ### Fixed
 
 - Blossom uploads validate destinations and ciphertext before signing, reject mismatched server descriptors, and use the spec fallback URL when a descriptor omits its URL.
-- Inviting from a kind 30443 event now checks that its tags describe the KeyPackage it carries, as MDK does: the `i` tag must be the KeyPackageRef, and `mls_ciphersuite`, `mls_extensions`, `mls_proposals` and `app_components` must each appear once and match the decoded LeafNode (`mls_proposals` with the same GREASE rules as `checkKeyPackageProposalsTag`). White Noise already rejected these events, so marmot-ts could invite from a KeyPackage other clients ignore. The check is exported as `validateKeyPackageEventMetadata` and throws `KeyPackageEventMetadataError`.
 
 ## 0.8.0
 

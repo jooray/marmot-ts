@@ -1,4 +1,5 @@
 /** @module @category Client - Key Package Manager */
+import { watchCurrent } from "../utils/watch-current.js";
 import { getAppComponents } from "../core/components/dictionary.js";
 import { GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID } from "../core/components/ids.js";
 import type { GroupContextExtension } from "ts-mls";
@@ -707,44 +708,29 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
    *
    * Yields the current snapshot on subscription, then re-yields on every
    * subsequent change.
+   *
+   * Pass an AbortSignal to stop watching. Abort, return, throw, and async
+   * disposal release listeners and interrupt pending reads without another event.
+   * Abandoned reads may finish internally; their results are ignored.
    */
-  async *watchKeyPackages(): AsyncGenerator<ListedKeyPackage[]> {
-    let resolveNext: (() => void) | null = null;
-    let pending = false;
-
-    const signal = () => {
-      if (resolveNext) {
-        resolveNext();
-        resolveNext = null;
-      } else {
-        pending = true;
-      }
-    };
-
-    this.on("added", signal);
-    this.on("removed", signal);
-    this.on("updated", signal);
-    this.on("published", signal);
-
-    try {
-      yield [...(await this.#store.snapshot())];
-
-      while (true) {
-        await new Promise<void>((resolve) => {
-          if (pending) {
-            pending = false;
-            resolve();
-          } else {
-            resolveNext = resolve;
-          }
-        });
-        yield [...(await this.#store.snapshot())];
-      }
-    } finally {
-      this.off("added", signal);
-      this.off("removed", signal);
-      this.off("updated", signal);
-      this.off("published", signal);
-    }
+  watchKeyPackages(
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<ListedKeyPackage[]> {
+    return watchCurrent({
+      ...options,
+      read: async () => [...(await this.#store.snapshot())],
+      subscribe: (changed) => {
+        this.on("added", changed);
+        this.on("removed", changed);
+        this.on("updated", changed);
+        this.on("published", changed);
+        return () => {
+          this.off("added", changed);
+          this.off("removed", changed);
+          this.off("updated", changed);
+          this.off("published", changed);
+        };
+      },
+    });
   }
 }

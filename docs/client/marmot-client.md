@@ -255,7 +255,9 @@ The client managers provide two ways to react to state changes: **async generato
 
 ### Async Generators
 
-`client.groups.watch()` and `client.keyPackages.watchKeyPackages()` return **async generators** that yield new values whenever state changes:
+`client.groups.watch()` returns an async generator for group-set changes, loading persisted groups on each update. Use `client.groups.watch({ includeStateChanges: true, signal })` for loaded groups and their UI state changes without storage reads. `client.groups.snapshot` and its `changed` event provide the same loaded state synchronously as cached, read-only per-group snapshots.
+
+`client.keyPackages.watchKeyPackages()` observes key-package changes:
 
 ```typescript
 for await (const groups of client.groups.watch()) {
@@ -289,8 +291,9 @@ When your component unmounts or you want to stop watching, you need to break out
 const abortController = new AbortController();
 
 (async () => {
-  for await (const groups of client.groups.watch()) {
-    if (abortController.signal.aborted) break;
+  for await (const groups of client.groups.watch({
+    signal: abortController.signal,
+  })) {
     updateUI(groups);
   }
 })();
@@ -299,7 +302,7 @@ const abortController = new AbortController();
 abortController.abort();
 ```
 
-The loop only checks the signal when the next value arrives, so the generator and its listener stay alive until the next `updated` event. For UI integrations, see [UI Framework Integration](/client/ui-frameworks).
+Passing the signal detaches listeners and wakes a pending `next()` immediately, even while a storage read is in flight. Calling `return()`, `throw()`, or async disposal also cleans up immediately. The same `{ signal }` option is accepted by `client.keyPackages.watchKeyPackages()`, `client.invites.watchUnread()`, `client.invites.watchReceived()`, `client.watchInvites()`, and `group.history.subscribe(filters, { signal })`. Changes that arrive while your loop body runs are kept and may coalesce into one fresh snapshot. For UI integrations, see [UI Framework Integration](/client/ui-frameworks).
 
 ### Events for Lifecycle Hooks
 
